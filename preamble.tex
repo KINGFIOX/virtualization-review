@@ -10,6 +10,9 @@
 \setCJKsansfont{Noto Sans CJK SC}
 \setCJKmonofont{Noto Sans Mono CJK SC}
 \usepackage{amsmath,amssymb}
+\usepackage{amsthm}
+\theoremstyle{definition}
+\newtheorem{theorem}{定理}
 \usepackage{graphicx,xcolor,tikz}
 \usetikzlibrary{arrows.meta,positioning,fit,calc,backgrounds}
 \usepackage{booktabs,tabularx,longtable,array,multirow}
@@ -31,6 +34,7 @@
   subsection={format=\large\sffamily\bfseries,beforeskip=1.5ex,afterskip=0.8ex},
   subsubsection={format=\normalsize\sffamily\bfseries,beforeskip=1.2ex,afterskip=0.6ex}}
 \captionsetup{font=small,labelfont=bf,labelsep=quad,skip=6pt}
+\renewcommand{\lstlistingname}{代码块}
 \setlist{nosep,leftmargin=2em,topsep=4pt}
 \pagestyle{fancy}
 \fancyhf{}
@@ -45,7 +49,18 @@
 \setlength{\tabcolsep}{5pt}
 \lstset{basicstyle=\small\ttfamily,breaklines=true,columns=fullflexible,
   keepspaces=true,frame=single,rulecolor=\color{black!25},showstringspaces=false,
-  aboveskip=8pt,belowskip=8pt,captionpos=b}
+  aboveskip=8pt,belowskip=8pt,captionpos=b,
+  language=C,
+  keywordstyle=\color{blue!60!black}\bfseries,
+  commentstyle=\color{muted}\itshape,
+  stringstyle=\color{red!55!black},
+  emph={translator_io_start,gen_helper_csrrw,gen_set_gpr,do_csr_post,dest_gpr,
+    tcg_constant_i32,HELPER,riscv_csrrw,riscv_raise_exception,decode_save_opc,
+    gen_update_pc,exit_tb,DEF_HELPER_4},
+  emphstyle=\color{teal!60!black}\bfseries,
+  morekeywords={uint64_t,uint32_t,uint8_t,int8_t,target_ulong,TCGv,TCGv_i32,
+    TCGv_i64,DisasContext,DisasContextBase,CPURISCVState,RISCVException,
+    CPUArchState,privilege_mode_t,bool,true,false}}
 \definecolor{ink}{HTML}{24364B}
 \definecolor{muted}{HTML}{64748B}
 \definecolor{softblue}{HTML}{EDF3F8}

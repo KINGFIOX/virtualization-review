@@ -10,11 +10,51 @@
 
 \subsection{Popek--Goldberg 定义与充分条件}\label{sec:intro-pg}
 
-对“什么是可虚拟化的机器”这一问题的形式化回答，来自 Popek 与 Goldberg 1974 年的论文。他们先用三条性质给出 VMM 的定义，再在简化机器模型上证明一个可判定的充分条件\cite{source1}。这三条性质是等价性（equivalence）、资源控制（resource control）与效率（efficiency），属于 VMM 的定义本身，而不是三个可以分别取舍的定理。等价性要求任何程序在 VMM 之下的执行效果与它直接在原机器上运行不可区分，但明确允许两类例外：因可用资源数量不同造成的差异，以及因时间依赖（timing dependencies）造成的差异；前者是为了容纳 VMM 分配不同大小内存的情形，后者则是因为中间多了一层软件、且同一硬件上还有其他虚拟机并发存在。资源控制要求 VMM 对内存、外设等资源握有完全控制权，一方面使运行于其下的程序不可能访问任何未显式分配的资源，另一方面使 VMM 在规定条件下能够重新取得对已分配资源的控制。效率要求则最严：统计上占主导地位的那一子集客户指令必须直接由真实处理器执行，VMM 完全不介入；正是这一条把传统的解释器和纯软件模拟器排除在虚拟机的定义之外。
+对“什么是可虚拟化的机器”这一问题的形式化回答，来自 Popek 与 Goldberg 1974 年的论文。他们先用三条性质给出 VMM 的定义，再在简化机器模型上证明一个可判定的充分条件\cite{source1}。这三条性质属于 VMM 的定义本身，而不是三个可以分别取舍的定理：
 
-充分条件的关键在于区分敏感指令（sensitive instruction）与特权指令（privileged instruction）这两个不同概念。特权指令是机器的固有属性：在用户态执行会陷入、在管态执行则不陷入。敏感指令则分两类：控制敏感（control sensitive）指令试图在不过内存陷入序列的情况下改变可用资源数量或处理器模式，行为敏感（behavior sensitive）指令的执行效果依赖于它在真实内存中的位置或当前模式，行为敏感指令中的位置敏感例子是取得物理地址，模式敏感例子是访问上一执行模式的指令空间。敏感与特权并非同义词，一个机器即使具备管态与用户态两种模式，也未必满足“敏感集合包含于特权集合”；若存在某条敏感指令在用户态不陷入，仅仅把操作系统降权运行就无法保证等价性与资源控制同时成立。论文的定理 1 给出的是充分条件而非必要条件：在满足其全部机器模型假设的第三代式机器上，只要敏感指令集合是特权指令集合的子集（sensitive $\subseteq$ privileged），即可构造出满足三条性质的 VMM。trap-and-emulate 是对这一条件的直观解释——敏感指令在用户态自然陷入，由 VMM 代为模拟其语义——但它描述的是该条件下一种可行的实现方式，并不能外推为所有现代实现的必要条件。
+\begin{enumerate}[label=\arabic*.,leftmargin=2.5em,itemsep=2pt]
+\item \textbf{等价性（equivalence）}：任何程序在 VMM 之下的执行效果与它直接在原机器上运行不可区分，但明确允许两类例外：
+  \begin{itemize}[label=--,leftmargin=1.5em,itemsep=1pt]
+  \item 一方面，允许因可用资源数量不同造成的差异，以容纳 VMM 分配不同大小内存的情形；
+  \item 另一方面，允许因时间依赖（timing dependencies）造成的差异，因为中间多了一层软件，且同一硬件上还有其他虚拟机并发存在。
+  \end{itemize}
+\item \textbf{资源控制（resource control）}：VMM 对内存、外设等资源握有完全控制权。一方面，运行于其下的程序不可能访问任何未显式分配的资源；另一方面，VMM 在规定条件下能够重新取得对已分配资源的控制。
+\item \textbf{效率（efficiency）}：统计上占主导地位的那一子集客户指令必须直接由真实处理器执行，VMM 完全不介入；正是这一条把传统的解释器和纯软件模拟器排除在虚拟机的定义之外。
+\end{enumerate}
 
-这一形式结果有两个边界必须说清。其一，定理依赖的机器模型把状态记作可执行存储、处理器模式、程序计数器与 relocation-bounds 寄存器四元组，并显式假设 I/O 指令与中断不存在，尽管论文指出它们可作为扩展加入\cite[§2]{source1}。因此该模型覆盖的是处理器状态与一种简化的重定位内存，没有把完整中断与设备行为纳入形式证明。其二，论文第 7 节已经讨论递归虚拟化，即 VMM 能否在其自身上再运行一份 VMM，并给出定理 2：一台第三代式机器若满足两个前提即可递归虚拟化——它本身可虚拟化，且能够为它构造出一个无时间依赖的 VMM。这里的递归条件不承诺固定不变的低开销，每增加一层 VMM 都要消耗资源，实际实现还可能增加调度、状态切换与陷入处理的成本；第 \ref{sec:nested} 节将回到这一点，讨论其工程实现与代价，而不是宣称定理在第二层失效。
+充分条件的关键在于区分敏感指令（sensitive instruction）与特权指令（privileged instruction）这两个不同概念：
+
+\begin{enumerate}[label=\arabic*.,leftmargin=2.5em,itemsep=2pt]
+\item \textbf{特权指令（privileged instruction）}：机器的固有属性，与虚拟化过程无关——在用户态执行会陷入、在管态执行则不陷入；是否特权只取决于机器本身，从机器的操作原理即可判定。
+\item \textbf{敏感指令（sensitive instruction）}：执行效果受系统状态影响的指令，分两类：
+  \begin{itemize}[label=--,leftmargin=1.5em,itemsep=1pt]
+  \item \textbf{控制敏感（control sensitive）}：试图改变可用内存资源数量或处理器模式，且这种改变不经过内存 trap 序列。
+  \item \textbf{行为敏感（behavior sensitive）}：执行效果依赖于它在真实内存中的位置或当前模式。位置敏感（location sensitive）的例子是取得物理地址，模式敏感（mode sensitive）的例子是访问上一执行模式的指令空间。
+  \end{itemize}
+\end{enumerate}
+
+敏感与特权并非同义词：一个机器即使具备管态与用户态两种模式，也未必满足“敏感集合包含于特权集合”；若存在某条敏感指令在用户态不陷入，仅仅把操作系统降权运行就无法保证等价性与资源控制同时成立。正是在这两个集合的关系上，论文给出其核心结论：
+
+\begin{theorem}[Popek--Goldberg, 1974]\label{thm:pg1}
+对一台满足论文机器模型假设的第三代式机器，若其敏感指令集合是特权指令集合的子集（sensitive $\subseteq$ privileged），则可以为该机器构造出满足等价性、资源控制与效率三条性质的 VMM。
+\end{theorem}
+
+需要强调，这是一个充分条件而非必要条件：不满足该条件的机器未必不可虚拟化。trap-and-emulate 是对这一条件的直观解释——敏感指令在用户态自然陷入，由 VMM 代为模拟其语义——但它描述的是该条件下一种可行的实现方式，并不能外推为所有现代实现的必要条件。
+
+这一形式结果有两个边界必须说清：
+
+\begin{enumerate}[label=\arabic*.,leftmargin=2.5em,itemsep=2pt]
+\item \textbf{机器模型的范围}。定理依赖的机器模型——论文所称“第三代式机器”，即 IBM 360/370、Honeywell 6000、DEC PDP-10 这类具备管态/用户态双模式与内存重定位的经典计算机的简化模型——把机器状态记为四元组 $S = (E, M, P, R)$：$E$ 为可执行存储（容量 $q$ 的线性内存），$M$ 为处理器模式（$M \in \{s, u\}$，管态或用户态），$P$ 为程序计数器，$R = (l, b)$ 为 relocation-bounds 寄存器，即把访存地址 $a$ 重定位为 $a + l$ 并检查 $a \le b$ 的重定位界限。模型还显式假设 I/O 指令与中断不存在，尽管论文指出它们可作为扩展加入\cite[§2]{source1}。因此该模型覆盖的是处理器状态与一种简化的重定位内存，没有把完整中断与设备行为纳入形式证明。
+\item \textbf{递归虚拟化的前提}。论文第 7 节讨论递归虚拟化——VMM 能否在其自身上再运行一份 VMM——并给出定理 2：
+\begin{theorem}[Popek--Goldberg, 1974]\label{thm:pg2}
+若一台第三代式机器满足以下两个条件，则它是递归可虚拟化的：
+\begin{enumerate}[label=(\alph*),leftmargin=2.5em,itemsep=1pt]
+\item 该机器本身可虚拟化；
+\item 可以为它构造出一个无时间依赖（无 timing dependencies）的 VMM。
+\end{enumerate}
+\end{theorem}
+递归条件不承诺固定不变的低开销：每增加一层 VMM 都要消耗资源，实际实现还可能增加调度、状态切换与陷入处理的成本；第 \ref{sec:nested} 节将回到这一点，讨论其工程实现与代价，而不是宣称定理在第二层失效。
+\end{enumerate}
 
 \subsection{从形式模型到四维工程框架}\label{sec:intro-dims}
 

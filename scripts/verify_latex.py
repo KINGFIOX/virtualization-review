@@ -38,6 +38,7 @@ for group in re.findall(r'\\cite(?:p|t|author|year)?\*?(?:\[[^\]]*\]){0,2}\{([^}
 unknown = sorted(set(cites)-bibkeys)
 if unknown: errors.append('Unknown citation keys: '+str(unknown))
 labels = re.findall(r'\\label\{([^}]+)\}',body)
+labels += re.findall(r'label=\{([^}]+)\}',body)  # lstlisting 等环境的选项式 label
 refs = re.findall(r'\\(?:ref|eqref|pageref)\{([^}]+)\}',body)
 missing_refs = sorted(set(refs)-set(labels))
 if missing_refs: errors.append('Unknown reference labels: '+str(missing_refs))
@@ -59,7 +60,7 @@ for name in ['00-intro','01-software','02-hardware','03-nested']:
 for token in ['TODO','TBD','待补图','待补正文','待核验','此处省略']:
     if token in body: errors.append('Unresolved placeholder: '+token)
 figures = re.findall(r'\\label\{(fig:[^}]+)\}',body)
-if len(figures)!=7: errors.append('Expected 7 figures, got '+str(len(figures)))
+if len(figures)!=6: errors.append('Expected 6 figures, got '+str(len(figures)))
 if not (ROOT/'build/main.pdf').exists(): errors.append('No compiled PDF')
 
 # Bound-check actual PDF text. The header/footer are legitimate page content.

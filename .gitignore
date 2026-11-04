@@ -1,6 +1,7 @@
 # 构建产物
 build/
 logs/
+__pycache__/
 *.aux
 *.log
 *.out
