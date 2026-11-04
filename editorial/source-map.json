@@ -1,0 +1,9 @@
+{
+  "pg": "/home/ubuntu/高级操作系统教程/references/Popek and Goldberg - 1974 - Formal requirements for virtualizable third generation architectures.md",
+  "bellard": "/home/ubuntu/高级操作系统教程/references/Bellard - 2005 - QEMU, a Fast and Portable Dynamic Translator.md",
+  "kvmarm": "/home/ubuntu/高级操作系统教程/references/Dall and Nieh - 2014 - KVMARM the design and implementation of the linux ARM hypervisor.md",
+  "turtles": "/home/ubuntu/高级操作系统教程/references/Ben-Yehuda et al. - 2010 - The Turtles Project Design and Implementation of Nested Virtualization.md",
+  "arm": "/home/ubuntu/aarch64/manuals/armv8_arm_v8.6.md",
+  "gic": "/home/ubuntu/aarch64/manuals/ARM_IHI0069D_GIC_Architecture_Spec_v3.0_v4.0.md",
+  "smmu": "/home/ubuntu/.hermes/cache/scratch/virtualization-outline/smmuv3.txt"
+}

@@ -1,0 +1,15 @@
+# 构建产物
+build/
+logs/
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# 编辑器
+*~

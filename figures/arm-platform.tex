@@ -1,0 +1,22 @@
+\begin{figure}[tbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm]
+\node[box,text width=2.2cm] (cpu) at (0,0) {guest CPU\\EL1 / EL0};
+\node[box,text width=2.2cm] (s1) at (3.4,0) {CPU Stage-1\\VA $\to$ IPA};
+\node[greenbox,text width=2.2cm] (s2) at (6.8,0) {CPU Stage-2\\IPA $\to$ PA};
+\node[greenbox,text width=2.2cm] (ram1) at (10.2,0) {物理内存\\CPU 访问};
+\draw[wire] (cpu)--(s1); \draw[wire] (s1)--(s2); \draw[wire] (s2)--(ram1);
+\node[note] at (3.4,0.9) {guest 管理}; \node[note] at (6.8,0.9) {EL2 / KVM 管理};
+\node[box,text width=2.2cm] (dma) at (0,-2.0) {直通设备\\发起 DMA};
+\node[greenbox,text width=5.5cm] (smmu) at (5.1,-2.0) {SMMUv3：StreamID 选择 STE\\按配置使用 S1、S2 或两者组合};
+\node[greenbox,text width=2.2cm] (ram2) at (10.2,-2.0) {物理内存\\设备访问};
+\draw[wire] (dma)--(smmu); \draw[wire] (smmu)--(ram2);
+\node[note] at (5.1,-2.95) {DMA 映射、设备所有权与失效由宿主软件栈管理};
+\node[box,text width=2.2cm] (msi) at (0,-4.0) {设备完成事件\\例如 MSI};
+\node[amberbox,text width=5.5cm] (gic) at (5.1,-4.0) {GIC / ITS 与 KVM VGIC\\中断身份、路由与虚拟投递};
+\node[amberbox,text width=2.2cm] (vcpu) at (10.2,-4.0) {目标 vCPU\\中断处理程序};
+\draw[wire] (msi)--(gic); \draw[wire] (gic)--(vcpu);
+\end{tikzpicture}
+\caption[Arm 虚拟化的不同访问路径]{Arm 虚拟化的不同访问路径。CPU 地址翻译、设备 DMA 翻译和中断路由具有不同控制对象；图表示职责分工而非 SoC 互连布线，也不意味着所有 Linux 直通域都配置为 S2-only。\cite{source4,source9,source10}}
+\label{fig:arm}
+\end{figure}

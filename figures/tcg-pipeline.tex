@@ -1,0 +1,21 @@
+\begin{figure}[tbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm]
+\node[box,text width=2.8cm] (g) at (0,0) {RISC-V 指令\\前端解码与语义};
+\node[box,text width=2.8cm] (ir) at (4.3,0) {TCG IR\\优化与寄存器分配};
+\node[box,text width=2.8cm] (h) at (8.6,0) {x86-64 宿主代码\\TB 代码体};
+\draw[wire] (g)--(ir); \draw[wire] (ir)--(h);
+\node[note,anchor=west] at (-1.45,0.95) {翻译时：只在需要生成或重译 TB 时发生};
+\node[greenbox,text width=2.8cm] (look) at (0,-2.0) {PC 与 CPU 状态\\查找可用 TB};
+\node[greenbox,text width=2.8cm] (cache) at (4.3,-2.0) {TB 缓存\\复用已生成代码};
+\node[greenbox,text width=2.8cm] (run) at (8.6,-2.0) {执行宿主代码\\必要时调用 helper};
+\draw[wire] (look)--node[above,font=\footnotesize]{命中}(cache);
+\draw[wire] (cache)--(run);
+\draw[dwire] (look.north)--node[left,font=\footnotesize]{未命中}(g.south);
+\draw[dwire] (h.south)--++(0,-0.5)-|node[pos=0.55,above,font=\footnotesize]{写入缓存}(cache.north);
+\draw[wire] (run.south)--++(0,-0.7)-|node[pos=0.55,below,font=\footnotesize]{返回执行循环时重新查找}(look.south);
+\node[note] at (4.3,-3.5) {已链接的 TB 可以直接跳转；helper 调用本身不规定 TB 边界。};
+\end{tikzpicture}
+\caption[QEMU 的译时与运行时路径]{QEMU 的译时与运行时路径。上层将 guest 语义转换成宿主代码，下层复用代码；图为依据源码和开发文档整理的机制示意，并非实测 trace。\cite{source3}}
+\label{fig:tcg}
+\end{figure}

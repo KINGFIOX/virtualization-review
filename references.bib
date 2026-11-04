@@ -1,0 +1,69 @@
+% Keys preserve the source IDs from editorial/registered-sources.bib.
+% Publisher metadata supplements the original local primary-source records.
+@article{source1,
+  author = {Gerald J. Popek and Robert P. Goldberg},
+  title = {Formal Requirements for Virtualizable Third Generation Architectures},
+  journal = {Communications of the ACM},
+  year = {1974}, volume = {17}, number = {7}, pages = {412--421},
+  doi = {10.1145/361011.361073}
+}
+@inproceedings{source2,
+  author = {Fabrice Bellard},
+  title = {{QEMU}, a Fast and Portable Dynamic Translator},
+  booktitle = {Proceedings of the 2005 USENIX Annual Technical Conference, FREENIX Track},
+  year = {2005}, pages = {41--46}, publisher = {USENIX Association},
+  url = {https://www.usenix.org/legacy/event/usenix05/tech/freenix/bellard.html}
+}
+@misc{source3,
+  author = {{QEMU Project}},
+  title = {{QEMU} Source Code and Developer Documentation},
+  year = {2026},
+  note = {源码版本：\texttt{v11.1.0-3334-g56afd82bd4}；commit \path{56afd82bd4db9688f1c1c9d0e2ea163b8cde3283}。重点参照 Translator Internals、The memory API 及 RISC-V virt 文档}
+}
+@manual{source4,
+  author = {{Arm Limited}},
+  title = {{Arm} Architecture Reference Manual, {Armv8}, for {Armv8-A} Architecture Profile},
+  organization = {Arm Limited}, year = {2020},
+  number = {DDI 0487F.b}, note = {本文 CPU 架构基准；参照 D1.5、D1 异常模型、D5 VMSA 及相关系统寄存器定义}
+}
+@misc{source5,
+  author = {{Linux Kernel Community}},
+  title = {Linux Kernel Source Code, Version 7.0.14},
+  year = {2026},
+  note = {重点参照 \path{arch/arm64/kvm/}、\path{arch/x86/kvm/} 和 \path{drivers/iommu/arm/arm-smmu-v3/}；具体函数见正文脚注}
+}
+@inproceedings{source6,
+  author = {Christoffer Dall and Jason Nieh},
+  title = {{KVM/ARM}: The Design and Implementation of the Linux {ARM} Hypervisor},
+  booktitle = {Proceedings of the 19th International Conference on Architectural Support for Programming Languages and Operating Systems},
+  year = {2014}, pages = {333--348}, publisher = {ACM},
+  doi = {10.1145/2541940.2541946}
+}
+@inproceedings{source7,
+  author = {Muli Ben-Yehuda and Michael D. Day and Zvi Dubitzky and Michael Factor and Nadav Har'El and Abel Gordon and Anthony Liguori and Orit Wasserman and Ben-Ami Yassour},
+  title = {The Turtles Project: Design and Implementation of Nested Virtualization},
+  booktitle = {9th USENIX Symposium on Operating Systems Design and Implementation (OSDI 10)},
+  year = {2010}, publisher = {USENIX Association},
+  url = {https://www.usenix.org/conference/osdi10/turtles-project-design-and-implementation-nested-virtualization}
+}
+@inproceedings{source8,
+  author = {Ori {Ben Zur} and Jakob Krebs and Shai Aviram Bergman and Mark Silberstein},
+  title = {Accelerating Nested Virtualization with {HyperTurtle}},
+  booktitle = {2025 USENIX Annual Technical Conference (USENIX ATC 25)},
+  year = {2025}, pages = {987--1002}, publisher = {USENIX Association},
+  url = {https://www.usenix.org/system/files/atc25-zur.pdf}
+}
+@manual{source9,
+  author = {{Arm Limited}},
+  title = {{Arm} Generic Interrupt Controller Architecture Specification, {GIC} Architecture Version 3.0 and Version 4.0},
+  organization = {Arm Limited}, year = {2017},
+  number = {IHI 0069D}, note = {参照第5章 Virtual Interrupt Handling and Prioritization}
+}
+@manual{source10,
+  author = {{Arm Limited}},
+  title = {{Arm} System Memory Management Unit Architecture Specification, {SMMU} Architecture Version 3.0 and Version 3.1},
+  organization = {Arm Limited}, year = {2017},
+  number = {IHI 0070B},
+  url = {https://documentation-service.arm.com/static/5f900e9ef86e16515cdc0907},
+  note = {参照第3.2、3.3、3.6、3.8节}
+}

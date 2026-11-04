@@ -1,0 +1,1504 @@
+Exit Reason
+
+L1 → L0 [µs]
+
+L2 → L0 [µs]
+
+L2 Virtual
+
+nop hypercall
+vm-write
+vm-enter
+cpuid
+EPT Fault
+
+0.85
+1.1
+8.0
+0.78
+4.8
+
+2.82
+—
+—
+2.77
+3.7 ± 0.8
+
+L2 Physical
+
+Non-maskable interrupt
+
+5.7
+
+16.7
+
+Figure 3: Page table hierarchy in nested virtualization
+
+Table 1: L0 vm-exit handling duration, measured from
+vm-exit of the VM to the next vm-enter. All measurements
+are with CoV < 1%, except for EPT fault from L2.
+3.1
+
+L1 Physical
+L0 Physical
+
+L2
+1. EPT Fault
+
+World switches between L0, L1 and L2 may occur in a variety
+of execution scenarios, such as the invocation of privileged
+CPU instructions by L2 or L1. Notably, L2 always traps into
+L0, which forwards the event to L1. Some world switches are
+voluntary, i.e., when para-virtual I/O devices notify the L0 to
+perform an I/O event. This notification is implemented as a
+hypercall, which initiates a voluntary world switch.
+At the CPU level, world switches require flushing of the
+CPU execution pipeline, saving the VM’s registers into the
+Virtual Machine Control Structure (VMCS) data structure, and
+loading the hypervisor registers from the VMCS structure.
+These operations lead to non-negligible overheads. Vilanova
+et al. [60] show that these overheads amount to about 33% of
+a 10µs-long emulation of the cpuid instruction.
+Moreover, the handling latency of the vm-exit associated
+with each world switch may vary significantly depending on
+the cause of vm-exit, due to the execution of different code
+paths. Tab. 1 shows the latency of handling vm-exits in a few
+different scenarios. For example, handling a non-maskable
+interrupts is the most expensive. Notably, most transitions
+from L2 to L0 are more expensive than those from L1. This is
+caused by the need to inject the vm-exit from L0 to L1 and
+the manipulation of many of L0’s own data structures.
+Takeaway: World switches are expensive, and their latency
+varies depending on their cause. They are more expensive
+when triggered from L2 than from L1.
+So far, we have discussed the costs of world switches in
+isolation. Next, we focus on three specific scenarios to show
+how world switches affect their end-to-end performance in a
+nested virtual machine.
+EPT Faults
+
+Memory management is a key culprit of the nested virtualization tax, as the additional virtualization layer triples the
+number of world switches required to handle Extended Page
+Table (EPT) faults. To understand the origin of this overhead,
+we detail the implementation of the EPT fault mechanism for
+a nested guest in KVM.
+Fig. 3 illustrates the hierarchy of page tables in nested virtualization. As with the non-nested virtualization, L0 maintains
+
+990
+
+EPT Fault
+Handler
+
+2025 USENIX Annual Technical Conference
+
+L1
+
+EPT12 EPT02
+Entry Entry
+
+EPT 12
+
+Absent Absent
+
+Understanding World Switch Costs
+6 7 9
+
+3.2
+
+4. Handle fault
+
+Application
+
+3. Inject EPT fault
+
+EPT Fault Handler
+8
+
+5 L0
+
+4
+Present Absent
+
+2. Check if EPT12 contains entry
+
+8
+Present Present
+
+EPT 02
+
+(a) EPT fault handling in nested virtualization, see the
+text for details.
+
+(b) L2-PA mapping.
+Steps refer to (a).
+
+Figure 4: EPT fault handling in nested virtualization
+an EPT, called EPT0→1 1 , from L1 physical addresses (L1PA) to L0 physical addresses (L0-PA). However, unlike nonnested virtualization, L1 maintains an EPT, called EPT1→2 ,
+from L2 physical addresses (L2-PA) to L1 physical addresses
+(L1-PA). As CPUs do not support a 3-dimensional page-walk,
+L0 shadows EPT1→2 and maintains EPT0→2 which translates
+L2-PAs directly to L0-PAs. L0 lazily creates EPT0→2 while
+running L2.
+Fig. 4a walks through the EPT fault handler, while Fig. 4b
+illustrates the state of EPT1→2 and EPT0→2 throughout. L2
+encounters an EPT fault due to a missing EPT0→2 entry,
+which triggers a vm-exit to L0 1 . L0 checks if a valid
+mapping appears in EPT1→2 2 . If it is missing, L0 injects the
+EPT fault into L1, and enters L1 immediately thereafter 3 . L1
+handles the EPT fault by mapping the address in EPT1→2 4 .
+L1 tries to resume L2, trapping again into L0 5 . L0 enters
+L2 6 , which re-executes the instruction that triggered the
+EPT fault. Since EPT0→2 still contains a non-present entry,
+another vm-exit occurs 7 . L0 once again walks EPT1→2 8 ,
+finds the entry, and fixes EPT0→2 with the value from EPT1→2 .
+L0 then re-enters L2 9 , resuming execution. This procedure
+requires a total of six world switches, compared to only two
+in non-nested virtualization.
+We measure the EPT fault latencies incurred by a VM when
+faulting in 1GiB of consecutive memory with and without
+nesting. Tab. 2 shows the results. We observe that nested EPT
+faults experience 5.1× and 5.3× latency increase over the
+non-nested scenario for the average and 99p latencies, respectively, demonstrating the costs of additional world switches.
+1 This notation is adopted from [11]. The first digit is the virtualization
+
+layer that manages the table for the layer denoted by the second digit.
+
+USENIX Association
+
+Average Latency [us] ↓
+99p Latency [us] ↓
+
+L2 VM
+
+L1 VM
+
+Slowdown
+
+28.39
+49.13
+
+5.58
+9.35
+
+5.1×
+5.3×
+
+Table 2: EPT-fault Latencies in demand paging (lower is
+better).
+Impact on startup time. EPT faults occur most frequently
+early in the VM’s life cycle because memory has not been
+allocated yet. Therefore, the EPT fault handling performance
+directly impacts the startup time. In the context of nested
+virtualization, this metric is particularly important for Kata
+containers, as their usage scenarios are identical to regular
+containers, i.e., short lifetime and on-demand dynamic deployment [1], thus requiring low startup latency.
+To demonstrate the impact of the EPT fault handling on
+the boot time of a nested VM, we measure the startup time of
+a Node.js application with a Linux Ubuntu image in a Kata
+container. We define startup time as the time from issuing the
+startup command until the application responds to a network
+request. Starting the Kata container in a non-nested scenario
+takes 0.7 seconds, compared to 1.5 seconds as a nested VM.
+The latency breakdown shows that the EPT faults account for
+14% (0.1 seconds) and 46% (0.69 seconds) in the non-nested
+and nested cases respectively, highlighting the importance of
+reducing the EPT fault handling costs.
+Takeaway: World switches cause large overheads in EPT
+fault handling in nested virtual machines, with a significant
+end-to-end impact, e.g., on the startup time.
+3.3
+
+Networking
+
+Network I/O from L2 to the world outside the physical server
+must be performed via L0 which manages physical NICs.
+In a simple approach, called Nested-VirtIO, L1 mediates
+between L2 and L0. L0 exposes a virtual NIC to L1 (vNIC01 ),
+which in turn creates its own vNIC (vNIC12 ) and exposes
+it to L2. Under the hood, L1 connects and forwards traffic
+between vNIC01 and vNIC12 . Both vNICs are virtioNICs.
+A more sophisticated approach, called Direct Virtual Hardware, Direct-Assignment [45], utilizes QEMU’s IOMMU
+emulation, where L0 exposes multiple vNICs to L1, allowing
+it to connect vNIC01 directly to L2, effectively removing L1
+from the L2 network data path. Indeed, Tab. 3 shows significant performance benefits of Direct-Assignment over
+Nested-VirtIO - with latency reduced by 40% and 37% for
+mean and 99p respectively, and throughput increased by 44%.
+Both setups utilize the vhost-net [59] driver in the hypervisors.
+To understand this performance gap, we review the chain of
+events when L2 sends a single packet via Nested-VirtIO and
+via Direct-Assignment in Fig. 5a and Fig. 5b respectively.
+In Nested-VirtIO, 1 L2 executes an MMIO write to notify vNIC12 of the pending packet, which triggers vm-exit to
+L0. 2 L0 injects vm-exit to L1’s hypervisor, which forwards
+L2’s request to (vNIC12 )’s virtio worker thread 3 . The latter
+
+USENIX Association
+
+NestedVirtio
+
+DirectAssignment
+
+Relative
+
+Avg Latency [us] ↓
+99p Latency [us] ↓
+
+90.21
+106
+
+54.52
+67
+
+0.60×
+0.63×
+
+Throughput [Gb/s] ↑
+CPU Usage [%] ↓
+
+12.1
+100
+
+17.4
+196
+
+1.44×
+1.96×
+
+Table 3: UDP round-trip latency of packets with 1-Byte payload using netperf; TCP throughput with iperf3.
+L2
+
+1. vm-exit
+
+3. notify
+Hypervisor worker
+
+2. inject
+vm-exit
+Hypervisor
+
+4. vm-exit
+5. notify
+worker
+
+L1
+
+L2
+
+virtio
+worker
+
+1. vm-exit
+
+L0
+
+virtio
+worker
+
+6. send packet
+
+(a) First packet transmission
+Nested-VirtIO
+
+L1
+
+L0
+2. notify
+virtio
+Hypervisor worker
+worker
+3. send packet
+
+with
+
+(b) First packet transmission
+with Direct-Assignment
+
+Figure 5: Comparison of single packet transmission in
+Nested-VirtIO and Direct-Assignment
+tries to transmit the packet 4 , triggering a vm-exit from L1
+to L0 due to a similar MMIO write. L0’s hypervisor forwards
+the request to vNIC01 ’s virtio worker 5 which sends it via
+the physical NIC 6 .
+This process is much shorter in Direct-Assignment: 1
+L2 executes an MMIO write to notify (vNIC02 ), which triggers a vm-exit to L0. L0’s virtio worker sends the packet 2
+via the physical NIC.
+The overheads of Nested-VirtIO stem from the higher
+number of world switches: we observe a total of three world
+switches to transmit a packet using Nested-VirtIO compared to one world switch with Direct-Assignment.
+Unfortunately, Direct-Assignment effectively disables
+the control of L1 over L2 networking, by removing L1 from
+the L2 network control path. Thus, L1 cannot affect the
+policies of network management operations for its L2 guests,
+such as routing, monitoring, and traffic shaping, which are
+essential for the proper operation of containers.
+Takeaway: World switches in L2 network stack cause significant overheads. Direct-Assignment reduces the overheads,
+but it does not allow L1 to control L2’s network policies.
+3.4
+
+Application Profiling
+
+Profiling is broadly used to find bottlenecks in development
+and production systems, with some vendors, such as Netflix [30] and Google [55] continuously profiling their production applications. Moreover, all large cloud providers, such as
+AWS, Google Cloud, and Azure [8, 20, 27, 28] offer profiling
+utilities to their tenants.
+
+2025 USENIX Annual Technical Conference
+
+991
+
+Setup
+Latency [µs] ↓
+
+L0 → L1
+5.66
+
+L1 → L1
+25.63
+
+L1
+
+L1 → L2
+60.68
+
+1. vm-exit
+
+L0
+
+Table 4: Profiler sampling latency in different settings.
+Sampling profilers periodically interrupt a program and
+sample the programs state, as well as hardware performance
+monitoring counters (PMCs). Notably, sampling-based profilers are popular because they introduce minimal execution
+overhead, causing between 1% − 3% slowdown for most applications [20, 38].
+Each sampling event begins with an interrupt, caused by
+the overflow of a PMC, which counts cycles since the last
+event and ends when the profiled program resumes execution.
+During the event, the state of the running program is sampled and the PMC is reprogrammed. From a performance
+perspective, profiling an application inside a container and
+running on bare-metal hardware is the same as profiling a
+regular application. Profiling an L1 from L0 requires a single
+vm-exit for each sampling event.
+However, profiling inside a VM causes a dramatic slowdown. Tab. 4 compares the average latency of handling a sampling event when profiling L1 from L0 (L0 → L1), a container
+from L1 (L1 → L1) and a nested VM from L1 (L1 → L2). We
+observe that the latency of (L1 → L2) is about twice as large as
+the latency of (L1 → L1), and almost 8× higher than profiling
+a VM from L0.
+We now analyze the sequence of events that occur when
+profiling a container (Fig. 6a) and a nested VM (Fig. 6b) from
+L1. In the former case, KVM emulates the HW counters by
+exposing virtual registers. L0 traps the L1 when the latter tries
+to access them. The flow is as follows: 1 The HW counter
+triggers an interrupt, which triggers a vm-exit to the host
+(L0). 2 The host injects a similar interrupt to the L1, and
+enters L1. 3 As part of the interrupt handling routine, L1
+reprograms the HW counter and performs multiple accesses
+to MSRs, bringing the total world switch count to 18.
+Profiling an application in a nested virtual machine incurs
+higher overheads. 1 The HW counter triggers an interrupt,
+which triggers an exit from L2 to L0. 2 L0 injects a similar
+interrupt to L1, and enters L1. 3 As part of the interrupt
+handling routine, L1 reprograms the HW counter, accesses
+MSRs and performs the vmread and vmwrite, which access
+the VMCS, overall triggering 22 world switches. 4 L1 executes the vm-enter instruction, which triggers an exit to
+L1. 5 L0 emulates the vm-enter instruction and enters L2,
+which brings the total number of world switches to 26.
+Interestingly, the performance discrepancy between profiling a nested VM or a container stems not only from the
+number of world switches but also from their higher costs
+for the nested case. Our measurements show that 7.8 µs are
+spent by L0 injecting the NMI into L1, additional 8µs on the
+emulation of L1’s execution of the vm-enter instruction.
+
+992
+
+2025 USENIX Annual Technical Conference
+
+3. handle
+sampling event
+
+2. inject NMI
+Hypervisor
+
+18 World Switches
+
+(a) Profiling a container in L1
+
+L2
+
+Hypervisor
+3. handle
+sampling event
+
+1. vm-exit
+
+L1
+
+5. resume 2. inject vm-exit
+4. trap L0
+L2
+vm-resume
+Hypervisor
+
+26 World Switches
+
+(b) Profiling a Kata container in L1
+
+Figure 6: Comparison of world switches when profiling a
+standard container versus a Kata container from L1.
+Takeaway: Excessive world switches and their increased cost
+cause high overhead when profiling an L2 VM from L1.
+These diverse examples motivate us to build a generic infrastructure to reduce the aforementioned overheads of nested
+virtualization, as we describe next.
+
+4
+
+Design & Implementation
+
+HyperTurtle pursues the following design goals:
+1. Performance: Eliminate excessive world switches,
+2. Control: Retain L1’s ability to enforce policies on L2,
+3. Non-intrusiveness: Minimize L0 modifications,
+4. Generality: Provide a hardware-agnostic approach generalizable to optimize different OS subsystems.
+HyperTurtle offloads a subset of L1 hypervisor functionality into L0 thus minimizing excessive world switches (Goal 1).
+HyperTurtle leverages hyperupcalls, i.e., eBPF programs, to
+safely execute L1’s code in L0. Thus, L1 fully controls the
+offloaded logic executed in L0, implying that it retains full
+control over L2 (Goal 2). As the eBPF subsystem already
+exists in L0’s kernel, the only L0 modifications required are
+the export of nested virtualization-related information to be
+accessible to the hyperupcall eBPF function via helper functions, and the addition of an installation mechanism for eBPF
+programs from L1, achieving Goal 3. Last, HyperTurtle’s
+implementation is modular, making it applicable to accelerate
+different subsystems according to the user’s choice, as we
+empirically demonstrate in the rest of the paper (Goal 4).
+We focus our efforts on KVM, as the da-facto standard for
+virtualization in Linux, however, we believe that the design
+principles are applicable to Xen-based VMs. Additionally,
+we limit our design to a single level of nesting, leaving further
+design choices, such as the choice of the layer to which a
+hyperupcall should be installed for future work.
+4.1
+
+Design Overview
+
+HyperTurtle comprises the eBPF offloading infrastructure,
+new hooks in L0, new eBPF helper functions and the mechanisms for sharing data between L1 and eBPFs.
+The offloading mechanism allows L1 to install the relevant
+eBPF in L0 via a hypercall. It exposes two main features:
+load a program into L0 and link the program to the hook.
+
+USENIX Association
+
+A program is first loaded into L0 and verified by its eBPF
+verifier. L1 then attaches the hyperupcall to a hook in L0,
+which is invoked as part of L0’s logic for handling L2 events.
+
+subsystem-specific isolation mechanisms are detailed in the
+following sections.
+
+Design recipe. Each subsystem requires its own design
+to reduce the associated world switch overheads via eBPFs.
+However, each such design follows a general recipe which
+comprises three key steps:
+1. Sharing information: Exposing necessary information
+between L1 and the eBPF program for its operation. L1
+might need to be modified and L0 might need to expose
+new helper functions to assist the hyperupcall.
+2. Hook into L0: Implementing a hook in the L0 hypervisor to intercept and handle specific events.
+3. Develop eBPF program: Writing the desired functionality as an eBPF program that will run in its own isolated
+context from L0.
+We now explain the infrastructure shared by all hyperupcalls and then delve into the eBPFs for accelerating EPT fault
+handling, network control of L1, and application profiling.
+
+To combat high EPT fault latencies, we implement a hyperupcall which can map a non-present EPT1→2 entry during a
+nested guest’s EPT fault. Our implementation targets the filebacked memory virtualization backend, which is commonly
+used in QEMU and Cloud Hypervisor [33], and adopted by
+Kata Containers [42]. It relies on the shmem virtual file system, and enables shared memory between the host and guest.
+This backend typically works in conjunction with a user-space
+daemon, such as virtiofsd [61], to support shared file systems
+outside the VMM (see §2.1).
+
+4.2
+
+Hyperupcalls Infrastructure
+
+eBPF maps and L1 memory access. HyperTurtle employs
+shared eBPF maps for L0-L1 data sharing, instead of the
+packet-based communications in Hyperupcalls, to support
+concurrent access to shared data. To achieve this, HyperTurtle
+adds a new hypercall to create a shared-memory PCI device
+which exposes array eBPF maps from L0 to L1.
+In addition, we introduce a new helper function in L0,
+bpf_probe_read_hyperupcall, to enable eBPFs to access
+L1’s physical memory. This function is safe, in that it verifies
+that the address is valid and mapped to L1. In addition, it
+guarantees isolation between the eBPFs installed by different
+L1 VMs, ensuring that each eBPF can only access the memory
+regions of the L1 to which it belongs.
+Hyperupcall registration. An L1 guest registers a hyperupcall to the L0 hypervisor via a hypercall interface. L1
+provides the compiled eBPF program and the hook to attach
+it. L0 uses the existing eBPF registration mechanism in the
+Linux kernel to verify, load and link the hyperupcall. For
+improved security, L1 might also request to install an eBPF
+from a set of eBPFs vetted by L0 in advance.
+In contrast to the original hyperupcall infrastructure where
+the registration is implemented in a single hypercall, we separate the loading and linking into two hypercalls. This allows
+linking a single hyperupcall to multiple hooks and avoids
+duplicate loading, e.g., for networking-related hyperupcalls.
+Security. HyperTurtle may be used with two security models: 1. L1-provided eBPFs secured by L0’s eBPF verifier
+or stricter alternatives such as Prevail [25]. 2. Cloud vendor-vetted eBPFs, loaded only if signed and verified (e.g.,
+via Hornet [13]). The latter model provides more strict security where necessary. With both models, HyperTurtle ensures eBPFs can access only their own L2s and memory; and
+
+USENIX Association
+
+4.3
+
+4.3.1
+
+EPT Fault Handling
+
+Sharing Information
+
+The key design challenge of the EPT fault hyperupcall is
+managing the shared state between L1 and the hyperupcall
+running in L0. The design must account for L1 physical memory allocation, race conditions, as well as the consistency of
+L2’s physical memory mappings that may arise as the VMM
+and other processes access L2’s memory (e.g., virtiofsd [61]).
+Memory allocation. Since allocating memory from the
+hyperupcall’s eBPF context is too complex, we use a preallocated memory pool. Specifically, L1 maintains a pool of
+allocated frames in an eBPF map which is accessible from
+the hyperupcall. The hyperupcall falls back to the traditional
+EPT fault mechanism if the pool is empty. L1 replenishes
+the memory pool either asynchronously using a background
+kernel thread or synchronously in batches when L1 is called to
+serve a vm-exit. Our experiments show that using a pool size
+of 4096 frames suffices to avoid synchronous replenishment.
+We therefore use a 4096 frame pool size throughout the paper.
+Consistency with L1. The hyperupcall must prevent potential inconsistencies between EPT1→2 and other data structures
+in L1, such as the VMM’s page table and L1’s KVM internal data structures. For example, due to races on L1 virtual
+addresses (L1-VA) which correspond to an L2-PAs.
+To notify L1 of changes the hyperupcall makes to EPT1→2 ,
+it exposes a cyclic fault log called the hyperupcall fault log to
+L1 via a shared map, to which it logs the L2-PA it maps. On
+the next vm-exit entering L1, L1’s KVM faults the L1-VAs
+corresponding to the entries in the fault log into the VMM’s
+address space. If the log is full, the hyperupcall falls back to
+the original EPT fault mechanism. To make the hyperupcall
+aware of mappings performed by the VMM, the VMM’s cr3
+register is copied to a shared map. Access to the cr3 enables
+the hyperupcall to walk the VMM’s page table using the
+bpf_probe_read_hyperupcall helper function and check
+whether the faulted address has a preexisting mapping.
+To prevent race conditions, we wrap the hyperupcall with
+a lock. A failure to acquire the lock results in a fallback to
+the traditional EPT fault mechanism due to the limitations of
+eBPF lock implementations (see §2.2).
+
+2025 USENIX Annual Technical Conference
+
+993
+
+The lock is exposed to L1 via a shared map, allowing L1’s
+KVM to acquire the lock when handling an EPT fault in L1.
+Finally, to create a coherent memory mapping between the
+hyperupcall and users of the L2’s file backed memory (e.g.,
+L1’s hypervisor and the virtiofsd daemon), we wrap the shmem
+page fault handler with the following logic: (1) Acquire the
+hyperupcall’s lock (spinning if necessary). (2) Walk EPT1→2
+to check if the hyperupcall already mapped this page. If it has,
+map it to L1. (3) Call the original page fault handler. (4) Log
+the L2-PA which corresponds to the fault to a cyclic buffer,
+called page fault log, which is also a shared map. Step (2)
+is necessary because the hyperupcall might have created a
+mapping that is not yet visible from L1 (because an exit from
+L2 to L1 hasn’t occurred yet). To minimize its size, the VMM
+purges the log on the next vm-exit from L2. The maximal log
+size is equal to the number of L2 frames to prevent overflows.
+Future work may optimize this design.
+4.3.2
+
+L0 Hook
+
+We place the hyperupcall hook in L0’s handling of L2’s EPT
+fault, during step 2 from Fig. 4a, which allows L0 to call
+the hyperupcall upon the discovery of a non-present entry
+in EPT1→2 . The hyperupcall then maps a new L1 frame to
+L2, and allows L0 to finish the fault handling and resume the
+execution of L2, avoiding excessive world switches.
+4.3.3
+
+eBPF Program
+
+The hyperupcall receives the faulting L2-PA as well as the
+fault type (read or write), and then performs the following
+steps, wrapped within the hyperupcall lock:
+1. Walk L1’s VMM’s page table to check if a mapping
+exists for the L1-VA that corresponds to the L2-PA that
+triggered the fault. If a mapping exists, return an EPT
+entry pointing to the appropriate L1-PA.
+2. If the L2-PA is in the page fault log (faulted in by an
+external process in L1), fall back to the traditional EPT
+fault mechanism.
+3. Create a new EPT entry using a frame from the hyperupcall’s memory pool.
+4. Write the new entry into EPT1→2 and the fault log.
+After the hyperupcall returns, L0 continues to handle the EPT
+fault as EPT1→2 is now present.
+4.4
+
+Fast L2 Networking with L1-Controlled Policies
+
+The Direct-Assignment method, introduced by DVH [45],
+improves performance, but takes away L1’s control over L2’s
+network traffic. HyperTurtle allows L1 to install eBPF programs on L0’s network interfaces, enabling it to regain control
+by attaching hyperupcalls to the virtual devices used by L2.
+While this represents a relatively simple use case for hyperupcalls, it demonstrates how HyperTurtle can restore control
+without sacrificing performance.
+Fig. 7 explains the operation of the networking subsystem
+using Direct-Assignment with eBPFs in the L2’s network
+data path. As per the general recipe (see §4.1) — we share
+
+994
+
+2025 USENIX Annual Technical Conference
+
+L1
+Hyperturtle
+Program
+
+install
+
+QEMU
+user
+kernel
+
+L2
+
+install eBPF
+program
+
+forward call
+to VMM
+KVM
+
+network
+interface
+shared
+map
+
+L0
+
+eBPF
+Program
+tap-device
+
+Figure 7: Networking eBPF in the L2 data path
+information via shared maps and hooks are supplied by L0’s
+eBPF infrastructure [15]. We implement the following proofof-concept eBPF programs to showcase L1’s ability to control
+L2 network policies.
+• Pass simple eBPF program that does not perform any
+processing,
+• Stateless Firewall filters packets based on their source
+IP address,
+• Rate Limiter caps the rate of L2’s incoming traffic based
+on data throughput and packet count. The limit can be
+dynamically configured at runtime by L1,
+• TCP-Top allows L1 to monitor all TCP connections of
+L2. It is a modified version of inspector-gadget’s tcptop
+program [34].
+Isolation & Multiple L2s. HyperTurtle ensures that the
+eBPF programs can run on the data path of virtual interfaces
+owned by the L1 VM that installed them. Thus, it guarantees
+that L1 cannot interpose on the traffic on the interfaces it
+does not own. Moreover, HyperTurtle utilizes the available
+per-vNIC hooks to allow L1 to load a different eBPF program
+to each L2 it manages.
+4.4.1
+
+Compatibility Layer with Container Management
+
+Kubernetes (k8s) is a prime candidate as a cluster management tool for nested VMs [23, 42]. In particular,
+Kata containers support management by k8s, but using
+Direct-Assignment breaks the compatibility with k8s and
+prevents L1’s control over the k8s network required for monitoring and policing with tools such as Clilium [14].
+To deploy HyperTurtle in k8s clusters, we integrate dynamic Direct-Assignment interface management via a custom Container Network Interface (CNI) plugin [7]. The plugin implements configuration of a k8s network by creating
+and configuring network interfaces as requested by k8s in
+the initialization process of a k8s pod (management unit of
+k8s). The L1 administrator may then install the eBPFs to
+implement the network functions explained before.
+Fig. 8 presents the dynamic interface creation. In step 1 ,
+the user requests k8s to create a new pod. To create the pod,
+K8s requests new NIC from the CNI plugin 2 which internally requests it from L0 via a hypercall interface 3 .
+
+USENIX Association
+
+1. Create new
+Pod
+K8s
+
+L1
+10. Configure Pod
+and start init process
+
+2. Request NIC
+
+Isolation. We inherit the isolation guarantees from the
+perf’s system call, as it allows us to control the sampler only
+when the process currently running is in the guest mode.
+
+Pod
+9. Configure
+Interface
+
+CNI
+
+4.6
+
+DVH interface
+
+L0
+
+3. Request new
+interface
+
+7. add interface
+to bridge
+
+QEMU
+
+8. Hotplug
+Interface
+user
+eBPF
+
+5. create
+veth pair
+4. forward
+call to VMM
+KVM
+
+6. return
+veth pair
+net/veth driver
+
+kernel
+
+veth
+
+bridge
+
+Figure 8: Dynamic virtual interface creation with k8s for
+spawning a new pod with a DVH network interface. The pod
+in L1 may be a regular container or a Kata container.
+KVM receives the hypercall and forwards it to QEMU 4 ,
+which creates the new vNIC 5 . The L0 kernel creates the
+interface 6 , such that QEMU attaches it to a predefined
+bridge 7 , and dynamically hotplugs the interface to L1 via
+the standard QEMU mechanisms 8 . Meanwhile, the CNI
+plugin waits for the new interface to appear, and then assigns
+the correct network namespace and configures the addresses
+according to k8s’ request 9 . Finally, after CNI plugin returns,
+and k8s starts the pod’s init process 10 .
+Due to the modular design of the CNI plugin, it also allows
+the management of VM interfaces and is compatible with
+other projects without additional implementation efforts.
+4.5
+
+Profiling
+
+The hyperupcall to accelerate profiling does not require any
+information from L1, but it needs to share the samples with the
+application running in L1. Following the recipe from §4.1, we
+adopt an approach similar to perf [59] and share information
+via a shared map as a ring buffer which holds the samples.
+The buffer must be emptied periodically by L1 to allow the
+profiler to continuously log samples. Additionally, we added
+a new eBPF helper function, vcpu_probe which reads L2’s
+registers, allowing L1 to easily view it’s L2 state from within
+the hyperupcall.
+We utilize the preexisting profiling hook in Linux to define
+the hyperupcall, using perf’s system call interface to register
+the hyperupcall’s eBPF program as a sampling event. When
+L1 registers the hyperupcall, is specifies the frequency at
+which it wants the profiler to run.
+After registration, the eBPF program is the periodically
+called and can sample the guest. Our proof-of-concept profiler
+implementation samples the guest’s instruction pointer via
+
+USENIX Association
+
+new helper function, and logs them onto the ring buffer.
+
+Summary of Code Modifications
+
+Tab. 5 highlights the modest code modifications in the respective subsystems required to implement HyperTurtle infrastructure and the hyperupcalls to accelerate the described
+subsystems. Specifically, the L0 VMM, e.g., QEMU, implements the registration process, requiring the addition of
+the registration hypercalls. HyperTurtle’s EPT fault handling
+mechanism requires additional eBPF hooks in the L0 kernel
+that expose the EPT handler routine to the eBPF subsystem.
+The L0 kernel modifications are limited to exporting additional functions in the memory subsystem and addition of
+hooks. Lastly, the implementation requires minor additions to
+the L1 kernel, almost exclusively to the KVM kernel module
+and the eBPF framework. The implementations of all three
+hyperupcalls in eBPF are minimal.
+In summary, HyperTurtle requires modest changes to the
+kernel and relatively small amount of eBPF code to achieve its
+goal of significantly reducing the number of world switches.
+4.7
+
+Other usecases
+
+We briefly outline a number of other scenarios where HyperTurtle’s approach can be beneficial.
+Faster Networking. It is possible to utilize XDP’s AFXDP socket to route traffic directly from the network driver
+network functions from L2 VMs to L0 to further improve
+performance.
+Storage Devices. Similarly to networking, storage devices
+may be directly assigned from L0 to L2. By allowing eBPF
+function that run on L0 to access the file mapping information
+on L1, files could be read into L2 directly from L0.
+SmartNICs. Offloading eBPF programs from L1 to smart
+NICs can significantly improve performance, thereby completely removing network virtualization logic from the CPU
+and boosting the performance of nested virtual machines.
+Direct Execution and Scheduling. DVH [45] implemented direct execution of nested guests from an idle state of
+both L1’s and L2’s vCPU. This can be expanded upon and
+generalized with hyperupcalls, as L1 may ask L0 to run the L2
+vCPU without entering and exiting L1. This is most relevant
+on over-commited systems running latency sensitive applications such as memcached, as well as when L2 is running
+co-routines on different vCPUs.
+4.8
+
+Limitations
+
+Complex functions, e.g., access to L1’s file system, are difficult to implement using eBPFs due to the complexity of
+synchronizing concurrent access with L1. For the same reason it is unclear how to implement full-offloading without a
+fallback to L1.
+
+2025 USENIX Annual Technical Conference
+
+995
+
+Level
+
+Codebase
+
+Size [LoC]
+
+Description
+
+L0
+L0
+L0
+L0
+L1
+L1
+
+Kernel/KVM
+Kernel/eBPF
+QEMU
+QEMU
+Kernel/mm
+Kernel/KVM
+
+151
+119
+616
+159
+32
+653
+
+Hyperupcall Infrastructure (see §4.2) and EPT fault hook (see §4.3)
+Addition of new helper functions (see §4.5 and §4.2)
+Installer for Hyperupcall programs (see §4.2)
+Dynamic Direct-Assignment interface creation (see §4.4.1)
+Support shmem backed memory (see §4.3)
+Exposing data to hyperupcalls (see §4.3)
+
+L0
+L0
+L0
+
+eBPF
+eBPF
+eBPF
+
+566
+263
+59
+
+EPT fault hyperupcall (see §4.3)
+Networking hyperupcalls (see §4.4)
+Profiler hyperupcall (see §4.5)
+
+Table 5: Code changes necessary to implement HyperTurtle
+Our EPT fault hyperupcall implementation does not support
+allocating huge pages. EPT faults of huge pages are scarce,
+and therefore accelerating the faults with a hyperupcall has
+no big performance impact. Additionally, the hyperupcall
+cannot map pages from L1’s page cache unless they are already mapped to L1’s VMM page table. Last, it does not
+yet support multiple EPT-fault hyperupcalls simultaneously.
+Thus, only one L1 may use the hyperupcall for a single L2.
+This limitation stems from using a global L0 eBPF hook, but
+can be eliminated by storing a per-L2 handler in L0’s KVM.
+We leave the implementation for future work.
+
+Microbenchmarks
+
+EPT Fault Handling. We evaluate the EPT fault hyperupcall by creating a Kata container, faulting in 1GiB of memory
+and measuring the latencies of the EPT fault. We compare
+3 configurations: (1) L2 VM: a vanilla nested VM, (2) L2 +
+
+996
+
+Bare-Metal
+Hypervisor (L0)
+
+2×Xeon Silver 4216 (16-core, 2.1GHz);
+512GiB RAM; Nvidia MT27710; SMT off;
+
+Nested
+Hypervisor (L1)
+
+12 vCPUs; 64GiB RAM; QEMU VMM
+
+L1/L2 Baseline
+(Kata Container)
+
+1 vCPU; 2GiB RAM; Cloud-Hypervisor
+VMM
+
+Networking
+
+virtio+vhost; tx zero-copy enabled
+
+Boot Parameters
+
+idle=poll; nopti
+
+2025 USENIX Annual Technical Conference
+
+Table 6: Evaluation Setup
+L2 VM
+L1 VM
+
+L0 → L1
+L1 → L1
+
+L2 VM + HT
+
+60
+
+L1 → L2
+HT → L2
+
+60
+
+40
+20
+4.76x
+
+Latency (us)
+
+Setup. Tab. 6 describes the setup in all the experiments
+unless stated otherwise. We pin vCPUs and vhost threads to
+different physical cores in a single NUMA node, and only one
+vhost thread is used in each hypervisor. We report average
+results of ten benchmark iterations. For some benchmarks,
+we describe the underlying distribution; however, for some
+microbenchmarks, we only receive statistical aggregates from
+the tooling and thus cannot report more detailed information.
+As discussed in §4.2, our modifications in L1 are limited to its
+kernel, which makes HyperTurtle compatible with different
+VMMs. As in prior work [32] we use Cloud-Hypervisor [33]
+as the Kata container’s VMM for its high performance and
+support for pass-through devices. These are not supported by
+competing VMMs such as Firecracker [1]. Cloud-Hypervisor
+has better startup times and higher networking performance
+compared to QEMU. All nested virtualization benchmarks
+are conducted inside Kata containers [18, 31, 64]. For the
+network benchmarks, the load generator runs on a bare-metal
+machine connected directly via a network cable to the system
+under test. While all presented empirical results use Kata
+containers, HyperTurtle is fully compatible with classical
+VMMs on L1 and classical VMs as L2.
+5.1
+
+Specification
+
+Evaluation
+
+Latency (us)
+
+5
+
+Component
+
+40
+20
+
+5.26x
+
+0
+
+Average
+
+99p
+
+0
+
+(a) Average and 99p EPT fault laten- (b) Latency of a profiler sampling
+cies. (lower is better).
+event time in different configurations
+(lower is better).
+
+Figure 9: EPT Fault and profiling latency microbenchmarks
+(lower is better). HT b
+= HyperTurtle.
+HyperTurtle: a nested VM with the EPT fault hyperupcall,
+(3) L1 VM: a non-nested VM – the performance upper bound.
+§5.1 compares the average and 99p EPT fault latencies
+across the listed configurations. HyperTurtle reduces the
+latency of an EPT fault of the vanilla nested VM by a factor of
+5.25× and 4.76× for the average and 99p latency respectively.
+Furthermore, it has the same average latency of an EPT fault
+for the non-nested L1 VM, and is only 8% slower in the 99p.
+Networking. HyperTurtle enables the use of DVH with the
+same level of control as Nested-VirtIO. However, its design
+introduces additional computation on each packet due to the
+execution of the respective eBPF programs in L1’s data path.
+
+USENIX Association
+
+Profiling. We profile GUPS application with a 4MiB working set running in the Kata container on top of L1. We set
+the profiler sampling frequency to 1000Hz (default in Intel
+VTune) and compare the following configurations:
+1. L0 → L1: Perf profiler profiling a Kata container running
+in L0. Represents optimal performance.
+2. L1 → L1: Perf profiler profiling a container running in
+L1 from L1.
+3. L1 → L2: Perf profiling L2 from L1 (vanilla baseline).
+4. HyperTurtle → L2: HyperTurtle profiler profiling L2.
+§5.1 presents the profiling sampling event handle times.
+Compared to L1 → L2, HyperTurtle → L2 reduces the handling time by 7.15×, and is only 16% slower than the optimal.
+
+HyperTurtle
+
+Baseline
+
+2.5
+2.0
+1.5
+1.0
+0.5
+0.0
+alp
+
+HyperTurtle
+Execution Time [s]
+
+3.0
+
+ine java
+
+js
+
+pd thon untu
+py ub
+
+(a) 4KiB Pages
+
+Baseline
+
+3.0
+2.5
+2.0
+1.5
+1.0
+0.5
+0.0
+
+ine java
+
+alp
+
+js
+
+pd thon untu
+py ub
+
+(b) 2MiB Pages
+
+Figure 10: Kata container startup latencies for different applications, with and without HyperTurtle (lower is better). pd b
+=
+Python with pandas, CoV < 5%.
+Fig. 10 compares the startup time of a nested VM with and
+without HyperTurtle. We observe that HyperTurtle reduces
+the L2 startup time by 27% and 8% on average when running
+with 4KiB and 2MiB pages respectively.
+Next, we compare the behavior of larger applications - an
+instance of Redis with a 1GiB persistent snapshot, and the
+TextService application from the DeathStarBench suite [24].
+Fig. 11 shows 55% and 35% performance improvements respectively. Running other micro services from the DeathStarBench resulted in similar performance (not shown).
+Nginx. To evaluate web server performance, we deploy Nginx [52] and serve the GCC manuals with 10 concurrent connections using ApacheBench [22], following DVH’s methodology [45]. We compare the performance of different hyperupcalls and include Direct-Assignment as an upper bound
+of performance. Fig. 12a shows that HyperTurtle increases
+throughput by 45% when using the TCP-Top and the rate
+limiter hyperupcalls - from 1.24KQPS to 1.8KQS, with nearidentical performance to Direct-Assignment.
+Redis. We evaluate HyperTurtle’s impact on Redis’s [53]
+throughput, using memtier_benchmark [54], under its default mixed GET/SET workload. Fig. 12b shows that HyperTurtle increases throughput by up to 65% compared to
+Nested-VirtIO, while all non-Nested-VirtIO are within
+6% of each other.
+HyperTurtle
+
+Baseline
+
+Macrobenchmarks
+
+Kata container startup time. We measure the time it takes
+a web server invoked in a Kata container to boot and respond
+to a single request. We evaluate different container images,
+as these may have a significant effect on the startup time [19],
+as well as both 4KiB and 2MiB page sizes. Importantly, even
+when 2MiB pages are used, the Kata runtime in L1 still maps
+the L2’s kernel to its physical address space using 4KiB pages,
+hence HyperTurtle improves performance by lazily mapping
+these pages. The page sizes in L1 and L2 are identical, such
+that an L2 frame corresponds to a single L1 page. We discuss
+
+USENIX Association
+
+1.5
+Speedup
+
+5.2
+
+the challenges of huge pages in §4.3.
+
+Execution Time [s]
+
+We measure the UDP round-trip-time latency and
+TCP throughput, and compare the following configurations:
+(1) Nested-VirtIO:
+vanilla nested VM,
+(2) Direct-Assignment: best-case performance with DVH
+but without L1’s control, (3) HyperTurtle + Pass: nested
+VM with HyperTurtle’s hyperupcalls mechanism, but with an
+empty hyperupcall, (4) HyperTurtle + Firewall: nested VM
+with HyperTurtle with a firewall hyperupcall, which allows
+L1 to enforce a firewall policy on L2’s network.. The pass
+and firewall hyperupcalls are detailed in §4.
+All configurations utilize a single vhost thread in L0, and
+Nested-VirtIO utilizes another vhost thread in L1.
+We use Netperf’s UDP_RR benchmark with 1-byte UDP
+payload to measure network latency [41]. We measure the
+maximum achievable throughput with iperf3 [40]. As our goal
+has been to stress the eBPF code the most, we need 3 vCPUs
+in the Kata container for the throughput testing to saturate
+the vhost thread. With a single vhost thread it becomes the
+bottleneck without achieving line rate. Similar throughput
+limits have been observed by Firecracker [1].
+Tab. 7 compares the average and 99p network latency and
+throughput. HyperTurtle + Firewall has a 11% higher average
+latency than Direct-Assignment (60.53µs vs 54.5µs) and
+33% lower average latency than Nested-VirtIO (60.53µs vs.
+90.2µs). The eBPF firewall itself causes this overhead, as HyperTurtle + Pass has near identical (p = 0.5%) performance to
+Direct-Assignment (55µs vs. 54.5µs). Thus, HyperTurtle’s
+infrastructure only has a minor impact on network latency,
+and the major source of overhead is the eBPF program itself.
+
+1.0
+0.5
+0.0
+
+deathstar-text
+
+redis-snapshot
+
+Figure 11: The launch time of a Kata containers running Redis
+with a 1GiB persistent snapshot, and a TextService microservice from the Deathstar suite (higher is better). CoV < 5%.
+
+2025 USENIX Annual Technical Conference
+
+997
+
+Metric
+
+Nested-VirtIO
+
+Direct-Assignment
+
+HyperTurtle + Pass
+
+HyperTurtle + Firewall
+
+Average Latency [µs] ↓
+99p Latency [µs] ↓
+
+90.2
+106.0
+
+54.52 (×1.6)
+67.0 (×1.6)
+
+55.0 (×1.6)
+67.0 (×1.6)
+
+60.5 (×1.5)
+73.0 (×1.4)
+
+Throughput [Gb/s] ↑
+
+12.1
+
+17.4 (×1.4)
+
+17.3 (×1.4)
+
+17.1 (×1.4)
+
+Table 7: Network latency and throughput. Values in parentheses are improvements relative to Nested-VirtIO. The CoV is
+below 10% in all the experiments.
+HT + Rate Limiter
+
+1.0
+0.5
+0.0
+
+60
+40
+20
+
+(b) Redis
+
+Figure 12: Evaluation of throughput in NGINX and Redis.
+Other Hyperupcalls show similar performance and are thus
+omitted.
+
+Latency [us]
+
+HyperTurtle + FW
+
+Nested VirtIO + FW
+
+1000
+
+500us SLA
+
+500
+
+0
+
+20000
+
+50000
+Throughput [queries/sec]
+
+1000
+
+500
+
+0
+
+0
+
+Direct Assignment
+
+Profiling from L1
+
+80
+
+(a) Nginx
+
+80000
+
+Figure 13: Memcached throughput-99p latency.
+Memcached. We use Memcached to show HyperTurtle’s
+effect on latency-sensitive applications. We use mutilate [43]
+as a load generator and Facebook’s ETC load [6] as query
+distribution. We examine HyperTurtle with a Firewall eBPF,
+and then compare the effects of profiling Memcached from
+L0 and L1. All reported results are the average of 10 runs,
+and have a standard deviation less than 0.1. Fig. 13 compares
+the 99th p latency in throughput-latency plot following the
+methodology of the IX project [10].
+HyperTurtle provides consistent throughput improvements,
+notably at the 500µs SLA from 29KQPS to 50KQPS. All
+while supporting L1-controlled network functions. HyperTurtle’s throughput is only 9% lower than Direct-Assignment
+at 500µs (50KQPS vs 55KQPS), which we attribute to the
+eBPF firewall application itself. We conclude that HyperTurtle enables the usage of L1-controlled eBPF network functions, such as firewalls, with performance on par with DVH.
+We use the same setup to evaluate the HyperTurtle profiler,
+as the tail latency of Memcached is sensitive to samplingbased profilers. Fig. 14 compares Memcached performance
+when profiling at frequencies of 1000Hz (Intel Vtune pro-
+
+998
+
+Profiling w/ HyperTurtle
+
+2025 USENIX Annual Technical Conference
+
+Latency [us]
+
+1.5
+
+HT + TCP Top
+
+Latency [us]
+
+Direct Assignment
+
+Throughput
+[1000 × queries/sec]
+
+Throughput
+[1000 × queries/sec]
+
+Nested VirtIO
+
+20000
+50000
+80000
+Throughput [queries/sec]
+
+(a) 1000Hz
+
+1000
+
+500
+
+0
+
+20000
+50000
+80000
+Throughput [queries/sec]
+
+(b) 4000Hz
+
+Figure 14: 99p latencies of Memcached get requests during
+profiling with 1KHz and 4KHz sampling rates. Both setup
+use Direct-Assignment networking.
+filer’s recommendation [38]) and 4000Hz (Linux perf’s default [59]). At a rate of 4000Hz, HyperTurtle profiler achieves
+26% higher throughput (42KQPS to 53KQPS) at 500µs query
+latency. Decreasing the sampling rate to 1000Hz reduces the
+throughput gain to 12% (49KQPS to 55KQPS). We conclude
+that HyperTurtle is effective in reducing the overhead of profiling of applications running in nested virtual machines.
+
+6
+
+Related Work
+
+Hyperupcalls [4] suggested the idea of safely executing L1
+code in L0. It was suggested as a mechanism which facilitates complex communication between the L1 and L0, which
+increased performance and flexibility.
+Nested virtualization. The overheads of nested virtualization are a well-known problem, exposed since the first implementation by the Turtles project [11].
+There have been several efforts to reduce the number of
+world switches to improve the nested virtualization performance. NEVE [44] proposed a series of architectural changes
+to the ARM architecture, aimed at reducing the overhead of
+nested virtualization by reducing the number of vm-exits.
+Intel introduced VMCS shadowing [35] with their Haswell
+lineup of processors, allowing L0 to not trap L1 on every
+execution of vm-write and vm-read instructions.
+DVH [45] is a collection of optimizations, including direct
+assignment of L0’s virtual I/O devices and timers to L2. This
+effectively removes L1 from the control and data path. However, it limits deployment scenarios because L1 can no longer
+enforce policies on L2 I/O operations.
+SVT [60] suggested utilizing SMT to run L0, L1 and L2
+each in a different hardware thread. This approach allows for
+fast world-switching, which improves performance.
+
+USENIX Association
+
+However, it does not reduce the increased handle times which
+are present in nested virtualization. Moreover, SVT requires
+CPU support for simultaneous multi-threading, which is often
+missing [2, 16], and will likely become unavailable in future
+CPUs [36, 37]
+Virtualization-based containers. Kata containers [42] is
+a container runtime which utilizes microVMs for improved
+sandboxing. This allows the creation, destruction, and overall
+management of micro-VMs based on standard container images. By complying with the Open Container Initiative (OCI)
+interface, it achieves compatibility with Kubernetes.
+Multiple works have suggested software virtualization as a
+cloud-native container sandboxing mechanism. LightVM [48]
+and X-Containers [57] propose to use Xen-based virtualization. While LightVM relies on Unikernels for container images, X-Containers uses a Linux-based Library OS. PVM [31]
+presents a hypervisor for software-virtualization, specially
+built for nested virtualization. It utilizes shadow paging and
+runs a para-virtual Linux guest These approaches, however,
+suffer from the known shortcomings of software virtualization, which has declined in popularity [9]. X-Containers [57]
+require the nested guest to use a specialized library OS, and
+PVM [31] utilizes syscall redirection and shadow paging for
+the nested guest, which lead to poor performance in syscallintensive applications such as Redis and SQLite [58].
+CKI [58] suggested an addition to the Protection Keys
+for Supervisor hardware extension, to create an isolated environment within the L1 kernel. With this approach, L2’s
+kernel runs in a sandbox within L1’s kernel, improving performance compared to traditional software-based solutions.
+This approach requires hardware modifications, so it cannot
+be used with existing systems. gVisor [29] takes a different approach to container isolation. It intercepts and handles system
+calls in a separate userspace process, which provides stronger
+isolation between containrs at the cost of higher overheads
+compared to traditional container runtimes.
+HyperTurtle can be used to accelerate these approaches
+as well, as they all suffer from increased overheads from the
+multiple virtualization layers present in the cloud.
+Avoiding nested virtualization. Some systems aim to
+avoid nested virtualization entirely. Peer-Pods [5] leverage
+cloud APIs to deploy Kata containers without nesting, while
+Free-The-Turtles [63] and Hyper-V [51] expose guest-level
+VM management interfaces. These approaches, however,
+give up hypervisor-level resource control, such as memory
+overcommitment across L2s within a single L1 VM — reducing deployment flexibility. Dichotomy [62] sidesteps nesting
+overhead by rapidly migrating the L2 VM between a minimal host hypervisor and a full-featured user hypervisor using
+memory remapping. However, it is incompatible with scenarios where L1 must remain continuously active, such as those
+involving Kubernetes orchestration. Out-of-Hypervisor [12]
+proposes exposing hardware virtualization features directly
+
+USENIX Association
+
+to the guest OS to support advanced tasks like checkpointing.
+HyperTurtle offers the convenience of full compatibility
+with existing deployments and tooling, while enabling significant performance gains.
+eBPF. There exists a variety of eBPF applications, especially in the form of network functions. HyperTurtle enables
+the compatibility of DVH with many eBPF network functions: BMC [26] implements eBPF Memcached read-cache.
+Cilium [14] provides powerful observability for Kubernetes
+clusters as eBPF programs. HyperTurtle provides the compatibility between Direct-Assignment and Kubernetes network
+introspection through Cillium. XDP [39] present an eBPF
+hook in the network device driver, enabling packet processing
+early in the kernel’s network stack. Similarly, XRP [65] used
+eBPF to offload storage lookups from user space to the kernel,
+reducing the overhead of the kernel storage stack.
+
+7
+
+Conclusion
+
+HyperTurtle proposes a general approach to accelerating
+nested virtualization by reducing the number of world
+switches. The idea is to use hyperupcalls, small eBPF programs, that encapsulate the relevant L1 hypervisor functionality and are invoked by L0 without transitioning to L1 when
+handing L2’s vm-exit. We demonstrate the effectiveness of
+HyperTurtle to reduce the overheads and the startup time of
+applications in nested Kata conatiners. We show substantial
+performance gains enabled by relatively modest code changes,
+and believe that HyperTurtle is a practical solution that can
+be further effective in many nested virtualization scenarios.
+
+8
+
+Acknowledgments
+
+We thank our shepherd Stella Bitchebe and the reviewers for
+their helpful comments and feedback. This work was partially
+supported by IBM – Technion Research Collaboration. We
+gratefully acknowledge the generous support of the Israeli
+Science Foundation (Grant 1998/22).
+
+References
+[1] Alexandru Agache, Marc Brooker, Alexandra Iordache,
+Anthony Liguori, Rolf Neugebauer, Phil Piwonka, and
+Diana-Maria Popa. Firecracker: Lightweight virtualization for serverless applications. In 17th USENIX
+Symposium on Networked Systems Design and Implementation (NSDI 20), pages 419–434, Santa Clara, CA,
+February 2020. USENIX Association.
+[2] Amazon. AWS Graviton Performance Testing: Tips
+for Independent Software Vendors. https://docs.a
+ws.amazon.com/pdfs/whitepapers/latest/aws-g
+raviton-performance-testing/aws-graviton-p
+erformance-testing.pdf#what-is-aws-graviton,
+2024. Online; Last accessed 14-Jan-2025.
+
+2025 USENIX Annual Technical Conference
+
+999
+
+

@@ -1,0 +1,23 @@
+\begin{figure}[tbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm]
+\node[note,anchor=west] at (-1.3,1.0) {GICv3：软件安排注入，硬件提供虚拟 CPU 接口};
+\node[box,text width=2.3cm] (event) at (0,0) {需软件注入的事件};
+\node[box,text width=2.3cm] (vgic) at (3.35,0) {KVM VGIC\\维护虚拟中断状态};
+\node[greenbox,text width=2.3cm] (ich) at (6.7,0) {ICH 配置与状态\\虚拟 CPU 接口};
+\node[greenbox,text width=2.3cm] (guest) at (10.05,0) {guest 通过 ICC\\确认与完成中断};
+\draw[wire] (event)--(vgic); \draw[wire] (vgic)--(ich); \draw[wire] (ich)--(guest);
+\node[note,anchor=west] at (-1.3,-1.15) {GICv4：为 vLPI 添加直接注入路径};
+\node[box,text width=2.3cm] (msi) at (0,-2.2) {设备消息\\DeviceID / EventID};
+\node[box,text width=2.3cm] (its) at (3.35,-2.2) {ITS 映射\\vPE / vINTID};
+\node[greenbox,text width=2.3cm] (rd) at (6.7,-2.2) {Redistributor\\目标 vPE 是否驻留};
+\node[greenbox,text width=2.3cm] (direct) at (10.05,-2.2) {驻留时直接投递\\guest 接收 vLPI};
+\draw[wire] (msi)--(its); \draw[wire] (its)--(rd); \draw[wire] (rd)--(direct);
+\node[amberbox,text width=2.3cm] (door) at (6.7,-4.2) {物理 doorbell\\通知宿主};
+\node[amberbox,text width=2.3cm] (sched) at (10.05,-4.2) {KVM 唤醒 / 调度\\管理 vPE 驻留};
+\draw[wire] (rd)--node[left,font=\footnotesize]{未驻留}(door);
+\draw[wire] (door)--(sched); \draw[dwire] (sched)--(direct);
+\end{tikzpicture}
+\caption[GICv3 与 GICv4 投递路径]{GICv3 与 GICv4 投递路径的机制对照。GICv4 并非虚拟化支持的起点，vLPI 直接注入也不消除配置和调度工作。\cite{source5,source9}}
+\label{fig:gic}
+\end{figure}

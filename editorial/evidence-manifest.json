@@ -1,0 +1,272 @@
+[
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Popek and Goldberg - 1974 - Formal requirements for virtualizable third generation architectures.md",
+    "first_line": 151,
+    "last_line": 218
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Popek and Goldberg - 1974 - Formal requirements for virtualizable third generation architectures.md",
+    "first_line": 250,
+    "last_line": 328
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Popek and Goldberg - 1974 - Formal requirements for virtualizable third generation architectures.md",
+    "first_line": 383,
+    "last_line": 431
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Popek and Goldberg - 1974 - Formal requirements for virtualizable third generation architectures.md",
+    "first_line": 510,
+    "last_line": 548
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Popek and Goldberg - 1974 - Formal requirements for virtualizable third generation architectures.md",
+    "first_line": 643,
+    "last_line": 730
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Popek and Goldberg - 1974 - Formal requirements for virtualizable third generation architectures.md",
+    "first_line": 950,
+    "last_line": 991
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Bellard - 2005 - QEMU, a Fast and Portable Dynamic Translator.md",
+    "first_line": 3,
+    "last_line": 57
+  },
+  {
+    "path": "/home/ubuntu/qemu/docs/devel/tcg.rst",
+    "first_line": 1,
+    "last_line": 191
+  },
+  {
+    "path": "/home/ubuntu/qemu/docs/devel/memory.rst",
+    "first_line": 1,
+    "last_line": 95
+  },
+  {
+    "path": "/home/ubuntu/qemu/docs/system/riscv/virt.rst",
+    "first_line": 1,
+    "last_line": 40
+  },
+  {
+    "path": "/home/ubuntu/qemu/docs/system/riscv/virt.rst",
+    "first_line": 109,
+    "last_line": 139
+  },
+  {
+    "path": "/home/ubuntu/qemu/target/riscv/insn32.decode",
+    "first_line": 142,
+    "last_line": 169
+  },
+  {
+    "path": "/home/ubuntu/qemu/target/riscv/tcg/insn_trans/trans_rvi.c.inc",
+    "first_line": 700,
+    "last_line": 723
+  },
+  {
+    "path": "/home/ubuntu/qemu/tcg/tcg.c",
+    "first_line": 6606,
+    "last_line": 6655
+  },
+  {
+    "path": "/home/ubuntu/qemu/include/tcg/tcg-opc.h",
+    "first_line": 28,
+    "last_line": 45
+  },
+  {
+    "path": "/home/ubuntu/qemu/accel/tcg/cpu-exec.c",
+    "first_line": 940,
+    "last_line": 1010
+  },
+  {
+    "path": "/home/ubuntu/qemu/accel/tcg/tcg-accel-ops.c",
+    "first_line": 97,
+    "last_line": 111
+  },
+  {
+    "path": "/home/ubuntu/qemu/target/riscv/tcg/cpu_helper.c",
+    "first_line": 497,
+    "last_line": 518
+  },
+  {
+    "path": "/home/ubuntu/qemu/target/riscv/tcg/cpu_helper.c",
+    "first_line": 645,
+    "last_line": 684
+  },
+  {
+    "path": "/home/ubuntu/qemu/target/riscv/tcg/cpu_helper.c",
+    "first_line": 1853,
+    "last_line": 1910
+  },
+  {
+    "path": "/home/ubuntu/qemu/accel/tcg/cputlb.c",
+    "first_line": 1025,
+    "last_line": 1104
+  },
+  {
+    "path": "/home/ubuntu/qemu/hw/intc/sifive_plic.c",
+    "first_line": 76,
+    "last_line": 136
+  },
+  {
+    "path": "/home/ubuntu/qemu/hw/intc/sifive_plic.c",
+    "first_line": 353,
+    "last_line": 361
+  },
+  {
+    "path": "/home/ubuntu/qemu/hw/char/serial-mm.c",
+    "first_line": 33,
+    "last_line": 84
+  },
+  {
+    "path": "/home/ubuntu/qemu/hw/char/serial.c",
+    "first_line": 123,
+    "last_line": 151
+  },
+  {
+    "path": "/home/ubuntu/qemu/hw/block/virtio-blk.c",
+    "first_line": 57,
+    "last_line": 69
+  },
+  {
+    "path": "/home/ubuntu/qemu/hw/block/virtio-blk.c",
+    "first_line": 1098,
+    "last_line": 1146
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Bellard - 2005 - QEMU, a Fast and Portable Dynamic Translator.md",
+    "first_line": 50,
+    "last_line": 112
+  },
+  {
+    "path": "/home/ubuntu/aarch64/manuals/armv8_arm_v8.6.md",
+    "first_line": 154270,
+    "last_line": 154322
+  },
+  {
+    "path": "/home/ubuntu/aarch64/manuals/armv8_arm_v8.6.md",
+    "first_line": 155402,
+    "last_line": 155436
+  },
+  {
+    "path": "/home/ubuntu/aarch64/manuals/armv8_arm_v8.6.md",
+    "first_line": 169645,
+    "last_line": 169685
+  },
+  {
+    "path": "/home/ubuntu/linux-source-7.0.0/arch/arm64/kvm/arm.c",
+    "first_line": 1191,
+    "last_line": 1220
+  },
+  {
+    "path": "/home/ubuntu/linux-source-7.0.0/arch/arm64/kvm/hyp/entry.S",
+    "first_line": 70,
+    "last_line": 88
+  },
+  {
+    "path": "/home/ubuntu/linux-source-7.0.0/arch/arm64/kvm/hyp/entry.S",
+    "first_line": 121,
+    "last_line": 151
+  },
+  {
+    "path": "/home/ubuntu/linux-source-7.0.0/arch/arm64/kvm/mmu.c",
+    "first_line": 2153,
+    "last_line": 2226
+  },
+  {
+    "path": "/home/ubuntu/linux-source-7.0.0/arch/arm64/kvm/mmio.c",
+    "first_line": 225,
+    "last_line": 259
+  },
+  {
+    "path": "/home/ubuntu/aarch64/manuals/ARM_IHI0069D_GIC_Architecture_Spec_v3.0_v4.0.md",
+    "first_line": 4204,
+    "last_line": 4286
+  },
+  {
+    "path": "/home/ubuntu/aarch64/manuals/ARM_IHI0069D_GIC_Architecture_Spec_v3.0_v4.0.md",
+    "first_line": 4380,
+    "last_line": 4432
+  },
+  {
+    "path": "/home/ubuntu/aarch64/manuals/ARM_IHI0069D_GIC_Architecture_Spec_v3.0_v4.0.md",
+    "first_line": 4648,
+    "last_line": 4776
+  },
+  {
+    "path": "/home/ubuntu/linux-source-7.0.0/arch/arm64/kvm/vgic/vgic-v3.c",
+    "first_line": 366,
+    "last_line": 397
+  },
+  {
+    "path": "/home/ubuntu/linux-source-7.0.0/arch/arm64/kvm/vgic/vgic-v4.c",
+    "first_line": 84,
+    "last_line": 105
+  },
+  {
+    "path": "/home/ubuntu/.hermes/cache/scratch/virtualization-outline/smmuv3.txt",
+    "first_line": 1142,
+    "last_line": 1239
+  },
+  {
+    "path": "/home/ubuntu/.hermes/cache/scratch/virtualization-outline/smmuv3.txt",
+    "first_line": 1391,
+    "last_line": 1427
+  },
+  {
+    "path": "/home/ubuntu/.hermes/cache/scratch/virtualization-outline/smmuv3.txt",
+    "first_line": 2456,
+    "last_line": 2528
+  },
+  {
+    "path": "/home/ubuntu/linux-source-7.0.0/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c",
+    "first_line": 3368,
+    "last_line": 3404
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Dall and Nieh - 2014 - KVMARM the design and implementation of the linux ARM hypervisor.md",
+    "first_line": 14,
+    "last_line": 34
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Dall and Nieh - 2014 - KVMARM the design and implementation of the linux ARM hypervisor.md",
+    "first_line": 165,
+    "last_line": 177
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Ben-Yehuda et al. - 2010 - The Turtles Project Design and Implementation of Nested Virtualization.md",
+    "first_line": 24,
+    "last_line": 44
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Ben-Yehuda et al. - 2010 - The Turtles Project Design and Implementation of Nested Virtualization.md",
+    "first_line": 220,
+    "last_line": 238
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Ben-Yehuda et al. - 2010 - The Turtles Project Design and Implementation of Nested Virtualization.md",
+    "first_line": 320,
+    "last_line": 467
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Ben-Yehuda et al. - 2010 - The Turtles Project Design and Implementation of Nested Virtualization.md",
+    "first_line": 468,
+    "last_line": 616
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Ben-Yehuda et al. - 2010 - The Turtles Project Design and Implementation of Nested Virtualization.md",
+    "first_line": 617,
+    "last_line": 737
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Ben-Yehuda et al. - 2010 - The Turtles Project Design and Implementation of Nested Virtualization.md",
+    "first_line": 789,
+    "last_line": 892
+  },
+  {
+    "path": "/home/ubuntu/高级操作系统教程/references/Ben-Yehuda et al. - 2010 - The Turtles Project Design and Implementation of Nested Virtualization.md",
+    "first_line": 1186,
+    "last_line": 1200
+  }
+]

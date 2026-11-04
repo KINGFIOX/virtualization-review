@@ -1,0 +1,18 @@
+{
+  "00-intro": {
+    "output": "chapters/00-intro.tex",
+    "task": "写第0部分引言，目标1800–2300汉字。\n读取新提纲第0部分（/home/ubuntu/高级操作系统教程/作业/期中报告_选题与提纲.md 第1–47行）及 /home/ubuntu/高级操作系统教程/virtualization-review/editorial/evidence-intro.md。\n输出以\\section{引言：虚拟化的形式要求与工程维度}\\label{sec:intro}开头，不手工设置章号。\n包含0.1背景与范围、0.2 P&G定义及充分条件、0.3四维分析框架。写一个正文可读的四维表，说明四维的对象和控制目标；可使用敏感指令集合包含式。递归定理写准确前提：可虚拟化，且能构造无时间依赖的VMM；不承诺固定低开销。\n首段清楚说明综述目的；末段自然引出软件虚拟化。不要加摘要或结语。"
+  },
+  "01-software": {
+    "output": "chapters/01-software.tex",
+    "task": "写第1部分QEMU全系统软件虚拟化，目标4000–5000汉字。\n读取新提纲第49–111行及 /home/ubuntu/高级操作系统教程/virtualization-review/editorial/evidence-software.md。\n输出以\\section{软件虚拟化：QEMU的全系统实现}\\label{sec:software}开头。\n必须五个subsection：CPU虚拟化、内存虚拟化、中断虚拟化、设备虚拟化、能力与成本。CPU篇幅不超过本章一半。\nCPU必须有RISC-V→TCG IR→x86-64三级路径、示意add/lw/CSR的区别，TB缓存与链接，以及helper语义边界。只给语义示意，未跑trace，不声称具体宿主机器码实测。\n内存写完整miss refill与guest fault区分；中断写串口→PLIC→pending/kick→架构投递与定时器；设备写MMIO回调及virtio-blk提交/后端/完成链，区分软件DMA与CPU页表。\n恰当插入\\input{figures/tcg-pipeline.tex}、\\input{figures/software-memory.tex}、\\input{figures/software-interrupt.tex}各一次并解释。无需自己画TikZ。"
+  },
+  "02-hardware": {
+    "output": "chapters/02-hardware.tex",
+    "task": "写第2部分Armv8.6-A硬件辅助虚拟化与KVM，目标4000–5000汉字。\n读取新提纲第113–167行及 /home/ubuntu/高级操作系统教程/virtualization-review/editorial/evidence-hardware.md。\n输出以\\section{硬件辅助虚拟化：Arm架构与KVM}\\label{sec:hardware}开头。\n必须五个subsection：CPU EL2与上下文；内存VA→IPA→PA；GICv3/v4中断；SMMUv3设备；协作小结。每个维度有完整处理路径及硬件/软件归属。以EL2/HCR/SPSR/ELR/eret基本机制为重，VHE/nVHE和FGT等只点到为止。\n给两阶段翻译式并解释guest页表访存走S2、TLB和权限。说明MMIO并不都返回QEMU。\nGICv3已经虚拟CPU接口，解释ICH状态与guest ICC访问；GICv4只是vLPI直达等，不全硬件化。\nSMMU先讲DMA再STE/CD/S1/S2，普通直通可无vIOMMU且Linux可能用host S1；完整设备直通需VFIO/GIC/复位，软件设备并非经物理SMMU。\n插入\\input{figures/arm-platform.tex}、\\input{figures/gic-delivery.tex}各一次并解释。不得写Arm NV/NV2/VNCR章节。"
+  },
+  "03-nested": {
+    "output": "chapters/03-nested.tex",
+    "task": "写第3部分x86-64嵌套虚拟化及主论文评议，目标5000–6500汉字，HyperTurtle至少占本章一半。\n读取新提纲第169–262行、/home/ubuntu/高级操作系统教程/virtualization-review/editorial/evidence-nested-turtles.md、/home/ubuntu/高级操作系统教程/virtualization-review/editorial/evidence-hyperturtle.txt；必要时读取同目录hyperturtle-full.txt。若文本超过单次读取限制要分段读完所需部分。\n输出以\\section{嵌套虚拟化：从Turtles到HyperTurtle}\\label{sec:nested}开头。\n涵盖L0/L1/L2动机，Turtles CPU/内存/中断/设备四维（subsubsection），world-switch成本，HyperTurtle注册与状态共享，EPT核心处理细节及回退，网络和profiling，实验证据评议，局限与后续问题。不要复述大段eBPF基础。\n明确Intel VMX/VMCS/EPT；Turtles当年的设计不等于当前KVM所有路径。HyperTurtle的VMCS/EPT软件机制不得移植术语成EL2。\n至少一个实验数据表，写出论文数据、基线、配置，不要生成不存在的原始测量值。已核数据可用：正文§5.1说平均EPT fault延迟改善5.25倍/99p4.76倍（图9a标5.26，故文字用“约5.25”并注明是原论文）；§5.2图10普通嵌套比较HT，4KiB/2MiB页启动时间平均降27%/8%。网络或profiling数据必须从你读到的表图文字核实，不能凭印象。\n评议必须提SMT关闭、固定NUMA/绑核、idle=poll/nopti；启动测到服务响应非仅boot；无L1策略的DVH不是同等管理能力基线；EPT hook一个L1一个L2限制不等于网络全受限。国内产业结合只给可推导的云/安全容器场景，不编造已部署事实。\n插入\\input{figures/nested-mapping.tex}与\\input{figures/hyperupcall.tex}各一次，图的解释必须与算法/状态一致。最后一节提出具体可测量的开放问题，不写空泛展望。"
+  }
+}
