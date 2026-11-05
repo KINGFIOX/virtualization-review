@@ -84,6 +84,19 @@
 \definecolor{softblue}{HTML}{EDF3F8}
 \definecolor{softgreen}{HTML}{EDF5EE}
 \definecolor{softamber}{HTML}{FBF3E4}
+% ---- Python 伪代码样式：listings 的 Python 只有 [2]/[3] 两个方言，必须显式选 3 ----
+\lstdefinestyle{pseudopy}{
+  language={[3]Python},
+  keywordstyle=\color{blue!60!black}\bfseries,
+  commentstyle=\color{muted}\itshape,
+  stringstyle=\color{red!55!black},
+  emphstyle=\color{teal!60!black}\bfseries,
+  emph={cpu_exec_loop,tb_gen_code,cpu_handle_interrupt,tcg_handle_interrupt,
+    address_space_dispatch,virtio_blk_handle_vq,guest_load,device_raise_irq,
+    kvm_arch_vcpu_ioctl_run,check_vcpu_requests,kvm_vgic_flush_hwstate,
+    kvm_arm_vcpu_enter_exit,handle_exit,smp_store_mb,kvm_vgic_sync_hwstate},
+  morekeywords=[2]{None,True,False}
+}
 \tikzset{box/.style={draw=ink!70,rounded corners=2pt,fill=softblue,align=center,
     font=\small,minimum height=10mm,inner sep=5pt},
   greenbox/.style={box,fill=softgreen},amberbox/.style={box,fill=softamber},

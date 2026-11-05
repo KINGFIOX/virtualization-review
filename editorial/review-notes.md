@@ -17,6 +17,7 @@
 - Turtles 的 L0 VMCS 合并优化与修改 L1 的 DRW 实验区分。14.5% kernbench、约7.8% SPECjbb 以及 DRW 配置不可合并成统一6–8%性能上界。
 - HyperTurtle 的 EPT、网络与 profiling 按各自实验度量整理。没有把动机分析绝对延迟与另一实验加速比拼接推算新数据；保留 §5.1 文本5.25和图9a标注5.26的末位差异说明。
 - HyperTurtle 实验配置与生产环境的差异作为外推限制，没有代作者声称这些设置是为了“放大切换占比”；`idle=poll` 也不是“关闭中断合并”。
+- 第2章章首新增 `struct kvm`/`kvm_arch` 总览块（代码块16，Linux 7.0 节选，字段分组按 CPU/内存/中断/设备四维），与章内四个小节一一对应；`kvm_vcpu.vcpu_idx` 注释中引用的 `kvm->vcpus` 已修正为 7.0 实际字段 `kvm->vcpu_array`。
 
 ## 排版与构建
 

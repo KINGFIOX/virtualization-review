@@ -10,7 +10,7 @@
 
 先看全景。QEMU 的 CPU 执行由译时与运行时两条路径组成，代码块~\ref{lst:tcg-loop} 给出伪代码。运行时主循环以 PC 与翻译相关 CPU 状态查 TB 缓存，命中直接执行已缓存的宿主代码，未命中才现场翻译；译时路径把 guest 指令逐条解码、翻译成 TCG IR，译到控制转移封块，再经优化与寄存器分配发射宿主机器码。
 
-\begin{lstlisting}[caption={QEMU 译时与运行时路径。译时把 guest 语义转换成宿主代码，运行时复用；依据源码与开发文档整理的机制示意，并非实测 trace。\cite{source3}},label={lst:tcg-loop}]
+\begin{lstlisting}[caption={QEMU 译时与运行时路径。译时把 guest 语义转换成宿主代码，运行时复用；依据源码与开发文档整理的机制示意，并非实测 trace。\cite{source3}},label={lst:tcg-loop},style=pseudopy]
 def cpu_exec_loop(cpu, pc):
     """运行时主循环：翻译只在缓存未命中时发生"""
     while True:
@@ -285,7 +285,7 @@ guest 的每一次访存都必须经过一段软件地址翻译，同时保留 g
 
 guest 操作系统负责建立它自己的页表，QEMU 的 RISC-V MMU 实现则在每次地址翻译时读取这些页表、逐级检查权限与访问类型，得到 guest 物理地址，或在违反规则时生成一条 guest 可见的访存异常；对 RISC-V 而言，访问类型还须与 PMP 规则再做一次物理内存保护检查，二者都通过才得到最终可用的 guest 物理地址。为把这条慢路径从每个访存的热循环里剥离，QEMU 用软件 TLB 缓存翻译结果。代码块~\ref{lst:softmmu} 给出这条路径的伪代码：
 
-\begin{lstlisting}[caption={软件 MMU 与软件 TLB 的访存路径：RAM 与 MMIO 两条分支},label={lst:softmmu}]
+\begin{lstlisting}[caption={软件 MMU 与软件 TLB 的访存路径：RAM 与 MMIO 两条分支},label={lst:softmmu},style=pseudopy]
 def guest_load(env, vaddr, size):
     """每次 guest 访存的入口：翻译代码生成的就是这条路径"""
     tlb_entry = tlb_lookup(env, vaddr)          # 软件 TLB 缓存（按 VA 页 + mmu_idx）
@@ -354,7 +354,7 @@ def do_mmio_read(env, mr, offset, size):
 
 通知与投递是两层不同的逻辑，下面分两个代码块看。代码块~\ref{lst:softirq-notify} 是第一层：设备事件如何变成 guest 可见的 pending 状态。
 
-\begin{lstlisting}[caption={第一层 通知：设备事件 $\rightarrow$ 控制器状态 $\rightarrow$ guest 的 mip},label={lst:softirq-notify}]
+\begin{lstlisting}[caption={第一层 通知：设备事件 $\rightarrow$ 控制器状态 $\rightarrow$ guest 的 mip},label={lst:softirq-notify},style=pseudopy]
 def device_raise_irq(dev, irq_line):
     """设备事件 -> 控制器输入。串口收字符、块设备完成、定时器到期都走这里"""
     qemu_set_irq(dev.irq_out[irq_line], 1)  # 拉高电平，递给控制器
@@ -377,7 +377,7 @@ def riscv_cpu_set_irq(cpu, irq, level):
 
 到此为止 guest 还没有被切换：它的 \code{mip} 里多了一个 pending 位，仅此而已。真正让 vCPU 停下来的动作属于第二层——代码块~\ref{lst:softirq-kick} 是宿主调度侧的 kick，代码块~\ref{lst:softirq-deliver} 才是回到公共循环之后的架构仲裁。
 
-\begin{lstlisting}[caption={第二层 打断：宿主线程调度侧的 kick 与 TB 出口检查},label={lst:softirq-kick}]
+\begin{lstlisting}[caption={第二层 打断：宿主线程调度侧的 kick 与 TB 出口检查},label={lst:softirq-kick},style=pseudopy]
 def tcg_handle_interrupt(cpu, mask):
     """可能在 iothread 上下文被调用：唤醒或打断目标 vCPU 线程"""
     cpu_set_interrupt(cpu, mask)  # 记到 cpu->interrupt_request
@@ -396,7 +396,7 @@ def gen_tb_start_check(cpu):
 
 回到公共循环之后才做完整仲裁，见代码块~\ref{lst:softirq-deliver}。
 
-\begin{lstlisting}[caption={第二层 投递：架构仲裁与 guest 状态机转移},label={lst:softirq-deliver}]
+\begin{lstlisting}[caption={第二层 投递：架构仲裁与 guest 状态机转移},label={lst:softirq-deliver},style=pseudopy]
 def cpu_handle_interrupt(cpu):
     """公共执行循环里调用：判断此刻是否真的该把中断交给 guest"""
     if not (cpu.interrupt_request & (CPU_INTERRUPT_HARD | CPU_INTERRUPT_RNMI)):
@@ -427,7 +427,7 @@ def cpu_handle_interrupt(cpu):
 
 控制路径由 MMIO 分发实现：guest 对设备寄存器地址的读写，先经物理地址空间定位到 MMIO 区域，再转交 \code{MemoryRegionOps} 里注册的回调。代码块~\ref{lst:mmio-ctrl} 以 NS16550 兼容串口为例给出这条控制路径。
 
-\begin{lstlisting}[caption={控制路径：一次 guest MMIO 读写如何落到设备状态机},label={lst:mmio-ctrl}]
+\begin{lstlisting}[caption={控制路径：一次 guest MMIO 读写如何落到设备状态机},label={lst:mmio-ctrl},style=pseudopy]
 def address_space_dispatch(as_, pa, size, is_write, value):
     """guest 物理地址 -> MemoryRegion -> 该设备的 MemoryRegionOps 回调"""
     mr, offset = address_space_translate(as_, pa, size)  # 查 MemoryRegion 图
@@ -454,7 +454,7 @@ def serial_mm_read(opaque, addr, size):
 
 数据路径则以 virtio-blk 展开，代码块~\ref{lst:virtio-blk} 给出从 virtqueue 到完成通知的全流程。
 
-\begin{lstlisting}[caption={数据路径：virtio-blk 从 virtqueue 取请求到完成通知},label={lst:virtio-blk}]
+\begin{lstlisting}[caption={数据路径：virtio-blk 从 virtqueue 取请求到完成通知},label={lst:virtio-blk},style=pseudopy]
 def virtio_blk_handle_vq(s, vq):
     """guest kick 之后：从 virtqueue 取描述符链，逐条处理"""
     while (req := virtio_blk_get_request(s, vq)) is not None:
