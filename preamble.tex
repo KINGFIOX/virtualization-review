@@ -38,13 +38,15 @@
 \ctexset{section={format=\Large\sffamily\bfseries,beforeskip=2.0ex,afterskip=1.3ex},
   subsection={format=\large\sffamily\bfseries,beforeskip=1.5ex,afterskip=0.8ex},
   subsubsection={format=\normalsize\sffamily\bfseries,beforeskip=1.2ex,afterskip=0.6ex}}
+% 每个一级标题另起一页（附录/参考文献不触发）
+\let\originalsection\section
+\renewcommand{\section}{\clearpage\originalsection}
 \captionsetup{font=small,labelfont=bf,labelsep=quad,skip=6pt}
 \renewcommand{\lstlistingname}{代码块}
 \setlist{nosep,leftmargin=2em,topsep=4pt}
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[L]{\small 高级操作系统教程\quad 虚拟化技术综述}
-\fancyhead[R]{\small 王靳}
 \fancyfoot[C]{\thepage}
 \renewcommand{\headrulewidth}{0.3pt}
 \definecolor{ink}{HTML}{24364B}
