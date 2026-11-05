@@ -4,6 +4,10 @@
 
 \subsection{CPU虚拟化：RISC-V到TCG IR再到x86-64}\label{sec:software-cpu}
 
+本节沿 QEMU 的翻译管线展开：先给出译时与运行时的全景（\ref{sec:software-cpu-loop} 小节），再看 guest 状态如何软件化（\ref{sec:software-cpu-state} 小节），随后分别进入前端 RISC-V→TCG IR（\ref{sec:software-cpu-frontend} 小节）与后端 TCG IR→x86-64（\ref{sec:software-cpu-backend} 小节），最后收束到 TB 缓存与 guest 异常（\ref{sec:software-cpu-tb} 小节）。
+
+\subsubsection{译时与运行时全景}\label{sec:software-cpu-loop}
+
 先看全景。QEMU 的 CPU 执行由译时与运行时两条路径组成，代码块~\ref{lst:tcg-loop} 给出伪代码。运行时主循环以 PC 与翻译相关 CPU 状态查 TB 缓存，命中直接执行已缓存的宿主代码，未命中才现场翻译；译时路径把 guest 指令逐条解码、翻译成 TCG IR，译到控制转移封块，再经优化与寄存器分配发射宿主机器码。
 
 \begin{lstlisting}[caption={QEMU 译时与运行时路径（Python 伪代码）。译时把 guest 语义转换成宿主代码，运行时复用；依据源码与开发文档整理的机制示意，并非实测 trace。\cite{source3}},label={lst:tcg-loop}]
@@ -37,6 +41,8 @@ def tb_gen_code(pc, cpu):
 \end{lstlisting}
 
 代码块~\ref{lst:tcg-loop} 把上述过程分成译时与运行时两侧：译时是"RISC-V 解码→TCG IR→优化与寄存器分配→x86-64 发射"的流水线，产物放入 TB 缓存；运行时则以 PC 与 CPU 状态查缓存，命中直接执行、未命中回译时，两条路径由块链接与调度循环衔接。需要强调的是，示意中的宿主代码代表语义等价实现，而不是固定的逐指令替换模板。
+
+\subsubsection{guest 状态：从硬件寄存器到 C 结构体}\label{sec:software-cpu-state}
 
 guest CPU 的机器状态首先表现为 QEMU 进程内的一组 C 结构。RISC-V 的通用寄存器、PC、CSR 与特权级都保存在 \code{CPURISCVState} 中，guest 的当前特权级只是该结构里的一个字段，它与承载 QEMU 进程的宿主线程实际运行在哪个特权级毫无对应关系：guest 的 M 态操作由生成代码或 helper 实现，而不会因此把 QEMU 线程提升到宿主内核态。QEMU 需要宿主服务时仍可通过系统调用进入宿主内核，这与 guest 的特权级变化无关。这是软件虚拟化与 P\&G 直接执行路径最根本的分野，guest 指令不会被宿主硬件执行，因此跨 ISA 的 QEMU 模拟并不满足 P\&G 关于统计上占主导的 guest 指令由真实处理器直接执行的效率要求\cite{source1,source3}。其状态载体与特权级表示如代码块~\ref{lst:cpuriscvstate} 所示：
 
@@ -99,6 +105,8 @@ target_ulong HELPER(csrrw)(CPURISCVState *env, int csr,
 
 为什么写一个 CSR 就要封块？因为 CSR 写可以改 \code{mstatus.MIE}（开关中断）、改特权级、改 \code{satp}（换页表）——刚刚为后续指令做出的翻译假设都可能作废，切断最安全。\code{riscv_csrrw()}（\path{target/riscv/tcg/csr.c}）先用 \code{riscv_csrrw_check()} 检查 CSR 是否实现、最低特权级与只读属性，再经 \code{riscv_csrrw_do64()} 按 CSR 表完成读改写；任一步失败都会返回 \code{RISCV_EXCP_*}，helper 随即转入 guest 异常路径。整个过程中，guest 的“M 态操作”只是对 \code{env->priv} 字段值（\code{PRV_M = 3}）的比较与更新，没有任何宿主特权级参与。
 
+\subsubsection{前端：RISC-V 到 TCG IR}\label{sec:software-cpu-frontend}
+
 回到译时路径的细节。QEMU 把一条 RISC-V 指令先解码，再表达为与目标无关的中间表示 TCG IR，最后才由宿主后端发射 x86-64 代码。这条三级路径是 QEMU 可移植性的来源：前端只负责把某种 guest ISA 的语义翻译成少量、正交的 TCG 操作，宿主后端只负责把 TCG 操作翻译成某一种宿主指令，两者之间用 IR 解耦，新增一个 guest 或 host 都无需改写另一端。TCG 操作包括临时变量的移动、整数算术（如 \code{add}、\code{and}）、分支、访存以及 \code{call} 等\footnote{QEMU: \path{include/tcg/tcg-opc.h}。}。其中 \code{add} 的译码项落入 \path{target/riscv/insn32.decode} 的 R 型格式，转译函数 \code{trans_add} 最终调用 \code{tcg_gen_add_tl} 发出一次目标宽度加法\footnote{QEMU: \path{target/riscv/tcg/insn_trans/trans_rvi.c.inc}，\code{trans_add()}。}。
 
 翻译以基本块为单位逐块进行：翻译器从当前 PC 出发译到控制转移为止，封出一个 TB。代码块~\ref{lst:rv-src} 是一段最小 RISC-V 程序——经 riscv64-linux-gnu 工具链汇编、链接为静态 ELF，运行退出码 49，与其语义一致（t0=3、t1=4、内存变量 var=42，累加为 49）。它是一条从 \code{_start} 到 \code{ecall} 的直线指令流：三条算术、一条 CSR 读、一次访存、最后退出。
@@ -154,6 +162,83 @@ OP:  （TB 2 末尾）
 
 对比两种 helper 形态：\code{rdcycle} 的 \code{call csrr} 会返回（读出的值经输出参数写回 \code{x30/t5}），封块是转译函数出于安全的自选动作；\code{ecall} 的 \code{call raise_exception} 声明为 noreturn，它不返回，guest 的“陷入”被压缩成一次不返回的 C 函数调用。两种形态合起来说明：语义压不进 IR 的操作一律退 helper，但 helper 本身不是 TB 边界——封不封块由转译函数按语义决定。IR 里没有任何 RISC-V 特性：guest 语义被压平成一批通用 op，这就是 m 个前端与 n 个后端只需 m+n 个模块的原因。
 
+\subsubsection{后端：TCG IR 到 x86-64}\label{sec:software-cpu-backend}
+
+后端把 IR 编译成宿主机器码：对整块 IR 做优化（前向折叠、常量传播），按块内活跃性为 temp 分配宿主寄存器，最后发射指令。仍以上一小节的同一个 guest 程序为例——代码块~\ref{lst:rv-backend-tb1} 是它的第一个 TB 在 \code{qemu-riscv64 -d in\_asm,op,out\_asm} 下的三层对照日志节选：\code{IN:} 是 guest 反汇编，\code{OP:} 是前端产出的 TCG IR，\code{OUT:} 是后端生成的 x86-64 机器码（反汇编标注便于阅读）。
+
+\begin{lstlisting}[caption={TB 1 的三层对照：IN（guest 反汇编）、OP（TCG IR）、OUT（x86-64 机器码，qemu-riscv64 -d in\_asm,op,out\_asm 节选）},label={lst:rv-backend-tb1}]
+IN: 0x000100e8:  428d      addi     t0,zero,3    # guest：t0 = 3
+    0x000100ea:  4311      addi     t1,zero,4    # guest：t1 = 4
+    0x000100ec:  006283b3  add      t2,t0,t1     # guest：t2 = t0 + t1
+    0x000100f0:  c0002f73  rdcycle  t5
+
+OP:  （TB 1）
+ add_i64 x5/t0,$0x0,$0x3
+ add_i64 x6/t1,$0x0,$0x4
+ add_i64 x7/t2,x5/t0,x6/t1
+ call csrr,$0x0,$1,x30/t5,env,$0xc00
+ mov_i64 pc,$0x100f4
+ exit_tb $0x0
+
+OUT: （TB 1）
+0x7fffe8000100:  8b5df0            mov    -0x10(%rbp),%rbx   # icount 检查
+0x7fffe8000103:  85db              test   %ebx,%ebx
+0x7fffe8000105:  0f8c44000000      jl     tb_exit
+0x7fffe800010b:  48c7452803000000  movq   $0x3,0x28(%rbp)    # addi t0 ← 3
+0x7fffe8000112:  48c7453004000000  movq   $0x4,0x30(%rbp)    # addi t1 ← 4
+0x7fffe8000119:  48c7453807000000  movq   $0x7,0x38(%rbp)    # add t2 ← 7！
+0x7fffe800012b:  be000c0000        mov    $0xc00,%esi        # CSR 号入参
+0x7fffe8000130:  488bfd            mov    %rbp,%rdi          # env 指针入参
+0x7fffe8000133:  e8f8a0aa0f        call   helper_csrr        # call csrr → 普通调用
+\end{lstlisting}
+
+对照着读三层：
+
+\begin{enumerate}[label=\arabic*.,leftmargin=2.5em,itemsep=2pt]
+\item guest 寄存器的“家”在 env 结构里：\asm{0x28(\%rbp)} 就是 \code{env->gpr[5]} 的槽位（TB 内 env 固定在 rbp），写回以 rbp 为基址——\code{addi t0,zero,3} 直接被折叠成一条 \asm{movq \$0x3,0x28(\%rbp)}，中间没有任何宿主寄存器参与；第二条 \code{addi} 同理。
+\item TB 内的常量折叠能把 \code{add} 的两个常量操作数提前算出：优化器算得 t2=7，后端最后一条直接发射 \asm{movq \$0x7,0x38(\%rbp)}——guest 三条算术在宿主侧也只剩三条，但这是常量折叠的结果，不是逐指令替换模板的必然产物，操作数在 env 与寄存器间的装入会让指令数随块内活跃性涨落。
+\item IR 层的 \code{call csrr} 到后端变成一次真实的函数调用：CSR 号 \code{0xc00} 摆进 \code{esi}（第二参数）、env 指针摆进 \code{rdi}（第一参数，即 IR 里的 \code{env} 操作数），按 SysV ABI \code{call helper_csrr}——前一小节代码块~\ref{lst:csrrw-flow} 描述的参数传递在这里落到具体指令。块首的 icount 检查（ld/test/jl）则是 TB 的例行入口开销，与 guest 指令无关。
+\end{enumerate}
+
+再看 TB 2 里的访存（代码块~\ref{lst:rv-backend-tb2}）。\code{lw t4,0(t3)} 的 IR 是地址计算加一条 \code{qemu_ld_i64}，后端按软件 TLB 缓存的映射发射快路径：t3 的地址常量（auipc+addi 折叠出的 \code{0x1110c}）直接装入 \asm{\%ebx}，\asm{movslq (\%rbx),\%rbx} 一次访存取数，再写回 t4 的 env 槽。本程序 \code{satp=0}（guest 未启用分页），TLB 项是直通映射，所以快路径就是直接访存；guest 启用分页后，这一步之前还有 tag 比较与慢路径分支，每条访存都要付这笔检查——这正是软件虚拟化开销的大头，第 2 章会看到硬件 stage-2 在 MMU 里免费做这件事。程序结尾的 \code{ecall} 同样退 helper：异常号 \code{0x8} 入参、\code{call raise_exception}，且该调用不返回（noreturn），后端无需为其生成后续代码。
+
+\begin{lstlisting}[caption={TB 2 的三层对照节选：访存展开为软件 TLB 快路径访存，ecall 退化为 noreturn helper 调用（qemu-riscv64 -d in\_asm,op,out\_asm 节选）},label={lst:rv-backend-tb2}]
+IN: 0x000100fc:  000e2e83  lw       t4,0(t3)
+    0x00010100:  01d38533  add      a0,t2,t4
+    0x00010108:  00000073  ecall
+
+OP:  （TB 2 节选）
+ mov_i64 loc5,x28/t3
+ qemu_ld_i64 x29/t4,loc5,noat+un+lesl,0
+ add_i64 x10/a0,x7/t2,x29/t4
+ mov_i64 pc,$0x10108
+ call raise_exception,$0x8,$0,env,$0x8
+
+OUT: （TB 2 节选）
+0x7fffe800025a:  bb0c110100        mov    $0x1110c,%ebx      # 地址常量直装入
+0x7fffe800025f:  48631b            movslq (%rbx),%rbx        # 直通映射：直接取数
+0x7fffe8000262:  48899de8000000    mov    %rbx,0xe8(%rbp)    # 写回 t4 的 env 槽
+0x7fffe8000269:  4c8b6538          mov    0x38(%rbp),%r12    # t2 从 env 装入 r12
+0x7fffe800026d:  4903dc            add    %r12,%rbx          # t2 + t4
+0x7fffe8000270:  48895d50          mov    %rbx,0x50(%rbp)    # a0 写回 env 槽
+0x7fffe8000283:  48c78530120000
+                08010100          movq   $0x10108,0x1230(%rbp) # 更新 pc
+0x7fffe8000290:  be08000000        mov    $0x8,%esi          # 异常号入参
+0x7fffe8000295:  488bfd            mov    %rbp,%rdi          # env 指针入参
+0x7fffe8000298:  e8859faa0f        call   raise_exception    # noreturn helper
+\end{lstlisting}
+
+代码块~\ref{lst:rv-backend-tb2} 中段 \code{add a0,t2,t4} 展示了寄存器分配的两个基本事实：
+
+\begin{enumerate}[label=\arabic*.,leftmargin=2.5em,itemsep=2pt]
+\item \textbf{寄存器分配的作用域是单个 TB}：t2 在上一 TB 里算得的值此刻只睡在 \code{env->gpr[7]} 槽里，后端为这条加法把它装入 \asm{\%r12}（callee-saved）、算完把 a0 写回 \code{env->gpr[10]} 槽（\asm{0x50(\%rbp)}）——装入与写回都在块边界发生，任何宿主寄存器都不携带跨 TB 的状态；每个 TB 必须可独立查找、链接、失效甚至整体冲刷，跨块状态住在寄存器里会让"删掉一个 TB"推翻所有 TB 的假设。这与编译器的函数级分配本质不同：没有跨块 live range、没有图着色，一个 temp 的宿主寄存器只在它所属的 TB 内有效。
+\item \textbf{call 处要同时满足两套约束}：helper 是宿主 ABI 的 C 函数，参数必须按 SysV 摆进规定的寄存器（代码块~\ref{lst:rv-backend-tb1} 里 \code{esi} 装 CSR 号、\code{rdi} 装 env），与此同时后端自己的分配器必须让路——QEMU 的 \code{tcg_reg_alloc_call}（\path{tcg/tcg.c}）在发射 call 前先把参数 temp 搬进 ABI 寄存器，再释放全部 caller-saved 寄存器（helper 有权破坏它们），并同步 guest 寄存器状态（\code{save_globals}，csrr 这种会写 guest 寄存器的 helper 调用前必须把已装入宿主寄存器的全局 temp 写回 env）。分配顺序与这两套约束是咬合的：\code{tcg_target_reg_alloc_order}（\path{tcg/x86_64/tcg-target.c.inc}）把 callee-saved 的 rbp/rbx/r12–r15 排在最前，guest temp 优先分到它们——跨 helper 调用不用重装；只有 callee-saved 分配完了，才会分配 caller-saved ，留给 call 的参数与 helper 可破坏的暂存。用一个小循环可以直观验证：\code{rdcycle} 嵌在 \code{bnez} 循环里时，循环变量 t1 分到 \asm{\%rbx}（callee-saved），helper 调用前后无需保存；而每条 \code{addi t1,t1,-1} 的宿主形态是 \asm{mov 0x30(\%rbp),\%rbx; dec \%rbx; mov \%rbx,0x30(\%rbp)}——装入、运算、写回，值不留在寄存器里跨出这个 TB（本机 \code{qemu-riscv64 -d out_asm} 实测）。
+\end{enumerate}
+
+这自然引出一个问题：既然任何宿主寄存器都不携带跨 TB 状态，退出 TB 时"还活着的"值怎么办？答案是 liveness 分析保证它们在离开前已经被写回 env——不是靠 TB 末尾一条显式的保存指令，而是在翻译时就安排好的同步点。机制在 \path{tcg/tcg.c} 的 liveness pass 里：\code{la_bb_end} 把 TB 末尾每个 temp 的状态置为 \code{TS_DEAD | TS_MEM}，发射阶段 \code{temp_sync} 据此对仍被占用的宿主寄存器生成一条写回 env 的 store。上面那个 \code{rdcycle} 嵌 \code{bnez} 循环的小程序，实测形态正是如此：循环体 \code{addi t1,t1,-1} 的宿主代码是 \asm{mov 0x30(\%rbp),\%rbx; dec \%rbx; mov \%rbx,0x30(\%rbp)}——算完立刻写回，\asm{\%rbx} 里不残留任何值跨出 TB。这个"最后使用者负责写回"的设计与分配只在 TB 内生效是同一枚硬币的两面：正因为 TB 可以整体失效、冲刷，块与块之间的契约就只能是 env 内存，寄存器里的值过了块边界一律作废。
+
+\subsubsection{TB 缓存与 guest 异常}\label{sec:software-cpu-tb}
+
 翻译产物组织成 Translation Block（TB），即在一组 CPU 状态假设下生成的可独立查找、链接和失效的代码单元。TB 不等同于编译器定义中的严格单基本块，内部可以出现标号与控制流。主执行循环 \code{cpu_exec_loop} 按当前 PC 与翻译相关 CPU 状态查找 TB，未命中才调用 \code{tb_gen_code} 现场翻译，命中则直接执行已缓存的宿主代码\footnote{QEMU: \path{accel/tcg/cpu-exec.c}，\code{cpu_exec_loop()}。}。TB 的有效性不只用 PC 作键：TB 记录了自己成立时假设不变的 CPU 状态（例如特权级、若干段基址），状态变化后必须重新查找匹配当前假设的 TB，必要时才生成新的代码。发射之前，TCG 还要对整块 IR 做优化、可达性分析与活跃性分析，再为临时变量分配宿主寄存器，最后由后端生成机器码——这些步骤在翻译时付出；运行时仍要执行转换后的指令、状态访问与 helper，缓存主要摊薄重复翻译的成本\cite{source3}。为了减少每次回到调度循环的往返，QEMU 提供直接块链接：\code{goto_tb}/\code{exit_tb} 机制在首次跳转后把跳转槽修补成目标 TB 的宿主地址，之后直接跳转；\code{lookup_and_goto_ptr} 则用 helper 查表、再 \code{goto_ptr} 分支\cite{source3}。其中，\code{goto_tb} 直接链接要求目标在翻译时可确定，并满足同页等映射安全约束；运行时查找目标的间接跳转不应与这种直接链接混为一谈。
 
 helper 是表达 guest 复杂语义的手段，而不是 TB 的边界标记：一个 TB 内部可以多次调用 helper，helper 返回后继续执行后续宿主代码。guest 异常同样存在，只是由软件实现。以本章 RISC-V 全系统模式下的访存异常为例：guest 执行 \code{lw t0, 0x4000(t1)} 访一个未映射或权限不足的地址，整条路径如代码块~\ref{lst:mmu-fault} 所示。
@@ -198,37 +283,213 @@ void riscv_cpu_do_interrupt(CPUState *cs)
 
 guest 的每一次访存都必须经过一段软件地址翻译，同时保留 guest 自己页表与权限的语义。地址关系是三层：guest 虚拟地址经 guest 页表得到 guest 物理地址，再落到 QEMU 进程中的宿主虚拟地址；最后由宿主操作系统与宿主 MMU 完成宿主虚拟地址到宿主物理地址的映射——这最后一段不是 QEMU 模拟的 guest 页表阶段，QEMU 并不干预它。
 
-guest 操作系统负责建立它自己的页表，QEMU 的 RISC-V MMU 实现则在每次地址翻译时读取这些页表、逐级检查权限与访问类型，得到 guest 物理地址，或在违反规则时生成一条 guest 可见的访存异常；对 RISC-V 而言，访问类型还须与 PMP 规则再做一次物理内存保护检查，二者都通过才得到最终可用的 guest 物理地址\footnote{QEMU: \path{target/riscv/tcg/cpu_helper.c}，\code{get_physical_address()}。}。为把这条慢路径从每个访存的热循环里剥离，QEMU 用软件 TLB 缓存翻译结果：TCG 生成的访存代码先检查缓存，RAM 命中时直接以缓存的宿主地址偏移完成读写，未命中才进入 MMU helper 补表\footnote{QEMU: \path{accel/tcg/cputlb.c}，\code{tlb_set_page_full()}；\path{target/riscv/tcg/cpu_helper.c} 中的地址翻译。}。这里必须区分两种"未命中"：软件 TLB miss 通常只是缓存里没有这一页，helper 重走 guest 页表后补上即可继续；而 guest 页表本身不合法时产生的是 guest page fault，会被 \code{raise_mmu_exception} 转成 guest 可见异常。前者是 QEMU 内部的性能事件，后者是模拟出来的架构事件，二者不能混同。
+guest 操作系统负责建立它自己的页表，QEMU 的 RISC-V MMU 实现则在每次地址翻译时读取这些页表、逐级检查权限与访问类型，得到 guest 物理地址，或在违反规则时生成一条 guest 可见的访存异常；对 RISC-V 而言，访问类型还须与 PMP 规则再做一次物理内存保护检查，二者都通过才得到最终可用的 guest 物理地址。为把这条慢路径从每个访存的热循环里剥离，QEMU 用软件 TLB 缓存翻译结果。代码块~\ref{lst:softmmu} 给出这条路径的伪代码：
 
-翻译结果之上是物理地址空间的建模。QEMU 用无环的 \code{MemoryRegion} 图与 \code{AddressSpace} 对象描述整台机器的地址布局：RAM 区域有宿主内存后备，读写直达宿主缓冲区；MMIO 区域没有宿主内存，每次访问都会转交对应设备模型处理；此外还有 ROM、ROM 设备、别名与容器等类型，用于表达只读固件、可动态改写的窗口等语义\footnote{QEMU: \path{docs/devel/memory.rst}。}。RAM 与 MMIO 在 TLB 填充阶段就被区分：前者缓存了"guest 地址到宿主内存的偏移"，后者设置 MMIO 等慢路径标志，并不提供可直接读写的 RAM 后备地址，使访存转向设备回调\cite{source3}。这种分流既决定了性能（RAM 快、MMIO 慢），也把内存虚拟化自然接到设备虚拟化上。
+\begin{lstlisting}[caption={软件 MMU 与软件 TLB 的访存路径：RAM 与 MMIO 两条分支（Python 伪代码，按 QEMU target/riscv/tcg/cpu\_helper.c、accel/tcg/cputlb.c 与 softmmu/memory.c 整理）},label={lst:softmmu}]
+def guest_load(env, vaddr, size):
+    """每次 guest 访存的入口：翻译代码生成的就是这条路径"""
+    tlb_entry = tlb_lookup(env, vaddr)          # 软件 TLB 缓存（按 VA 页 + mmu_idx）
+    if tlb_entry.hit:
+        if tlb_entry.flags & TLB_MMIO:
+            # (b) MMIO：TLB 项没有宿主内存后备，转设备模型回调
+            return do_mmio_read(env, tlb_entry.mr, vaddr & PAGE_MASK, size)
+        if tlb_entry.prot & PAGE_READ:
+            # (a) RAM 快路径：TLB 项缓存了「guest 页 -> 宿主内存偏移」
+            return host_read(tlb_entry.host_page_ofs + (vaddr & PAGE_MASK), size)
+    # 未命中：进入 MMU helper 补表
+    return riscv_cpu_tlb_fill(env, vaddr, size, MMU_DATA_LOAD)
 
-两类缓存解决的是两类不同的失效问题：地址翻译变化要求维护软件 TLB，代码内容变化要求失效对应的 TB。软件 TLB 根据 guest 虚拟页及 MMU 上下文选择表项；TB 的物理代码页关联则用于识别被修改的代码并维护失效关系，执行入口另有 PC 相关的快速查找。不能把这些结构统称为物理地址索引的缓存。系统模拟下，软件 MMU 的写入追踪及代码页关联用于失效受影响的 TB，并撤销相应直接链接\footnote{QEMU: \path{accel/tcg/cputlb.c}，\code{tlb_index()}；\path{docs/devel/tcg.rst}，代码失效说明。}\cite{source3}。
 
-\input{figures/software-memory.tex}
+def riscv_cpu_tlb_fill(env, vaddr, size, access_type):
+    """target/riscv/tcg/cpu_helper.c：走 guest 页表，失败则抛 guest 异常"""
+    if env.priv == PRV_M or not cpu_cfg(env).mmu:
+        pa, prot = vaddr, PAGE_READ | PAGE_WRITE | PAGE_EXEC   # M 态/无 MMU：直通
+    else:
+        pa, prot = walk_page_table(env, vaddr, access_type)    # 逐级读 guest 页表
+        pmp_prot = pmp_check(env, pa, access_type)             # PMP 物理内存保护
+        prot &= pmp_prot
+        if prot == 0:
+            # (c) 页表/PMP 判定失败 -> guest 可见的访存异常
+            raise_mmu_exception(env, vaddr, access_type, ...)
+            cpu_loop_exit_restore(cs, retaddr)    # 退出生成代码，回公共执行循环
+            return
+    # guest 物理地址按 MemoryRegion 图分流：RAM 有宿主后备，MMIO 没有
+    mr = address_space_translate(env.as, pa, &offset, size)
+    tlb_set_page_full(env, vaddr, mr, offset, prot)   # 回填软件 TLB（含 MMIO 标志）
+    if mr.is_mmio:
+        return do_mmio_read(env, mr, offset, size)    # 本次仍需走设备回调
+    return host_read(mr.host_page_ofs + offset, size)
 
-图~\ref{fig:softmem} 给出一次 load 的分支全景：RAM 快路径命中时使用缓存地址，miss 时进入 guest MMU 检查映射；合法 RAM 映射可补缓存，MMIO 仍走设备回调，翻译或权限失败则按架构类型生成 guest fault；翻译得到的 guest 物理地址再按 \code{MemoryRegion} 分流为 RAM 直通或 MMIO 回调。整条路径说明：软件虚拟化的访存开销集中在 TLB 命中检查与偶发的翻译慢路径上，而语义正确性依赖对页表与权限的忠实解释。
+
+def do_mmio_read(env, mr, offset, size):
+    """accel/tcg/cputlb.c: memory_region_dispatch_read -> MemoryRegionOps"""
+    return memory_region_dispatch_read(mr, offset, size, env.attrs)
+    # 落到设备模型注册的 .read 回调（如串口 serial_mm_read）
+\end{lstlisting}
+
+伪代码里三个出口对应三类结局：
+
+\begin{enumerate}[label=\arabic*.,leftmargin=2.5em,itemsep=2pt]
+\item \textbf{RAM 快路径}：软件 TLB 命中且该项缓存了宿主机内存偏移，直接读写宿主缓冲区——guest 的页表与权限语义在补表时已经检查过，热路径上不再重复。
+\item \textbf{MMIO 路径}：guest 物理地址落在没有宿主内存的 \codeplain{MemoryRegion} 上，TLB 项被标上 \code{TLB_MMIO} 标志、不提供宿主后备地址，每次访问都由 \code{memory_region_dispatch_read} 分发到设备模型注册的 \codeplain{MemoryRegionOps} 回调。RAM 与 MMIO 共享同一个 guest 物理地址空间，分流发生在 \code{address_space_translate} 查 \codeplain{MemoryRegion} 图的时候：前者直通宿主内存，后者转交设备状态机——这正是设备虚拟化的接入口，也是 MMIO 比 RAM 慢的原因。
+\item \textbf{架构异常}：页表项不合法或 PMP 拒绝时 \code{raise_mmu_exception} 设置异常索引并记录出错地址，\code{cpu_loop_exit_restore} 恢复该指令状态、退出生成代码，随后由 \code{riscv_cpu_do_interrupt} 兑现成 guest 可见的 \code{scause}/\code{stval}/\code{sepc}/\code{stvec} 转移。
+\end{enumerate}
+
+三类中前两类是 QEMU 内部的实现路径（一个走宿主内存、一个走设备模型），guest 都感知不到区别；只有第三类是模拟出来的架构语义。容易混淆的是软件 TLB 未命中与 guest 页错误：前者只是缓存里没有这一页，补表回填后继续执行，属性能事件，与 guest 是否越权无关。
+
+翻译结果之上是物理地址空间的建模。QEMU 用无环的 \codeplain{MemoryRegion} 图与 \codeplain{AddressSpace} 对象描述整台机器的地址布局：RAM 区域有宿主内存后备，读写直达宿主缓冲区；MMIO 区域没有宿主内存，每次访问都会转交对应设备模型处理；此外还有 ROM、ROM 设备、别名与容器等类型，用于表达只读固件、可动态改写的窗口等语义\footnote{QEMU: \path{docs/devel/memory.rst}。}。RAM 与 MMIO 在 TLB 填充阶段就被区分：前者缓存了"guest 地址到宿主内存的偏移"，后者设置 MMIO 等慢路径标志，并不提供可直接读写的 RAM 后备地址，使访存转向设备回调\cite{source3}。这种分流既决定了性能（RAM 快、MMIO 慢），也把内存虚拟化自然接到设备虚拟化上。
+
+两类缓存解决的是两类不同的失效问题：
+
+\begin{enumerate}[label=\arabic*.,leftmargin=2.5em,itemsep=2pt]
+\item \textbf{软件 TLB}：缓存的是地址翻译结果，失效源是「页表或权限变了」。它按 guest 虚拟页号加 MMU 上下文（\code{mmu_idx}，区分特权级/两阶段等）选择表项；映射一改就要清掉对应项，下次访存重新走页表。
+\item \textbf{TB 及其代码页索引}：缓存的是已编译的宿主代码，失效源是「被翻译的 guest 代码字节变了」。QEMU 用 \codeplain{PageDesc} 记录每个 guest 物理代码页上有哪些 TB——一个 TB 若跨两页，在 \code{tb_page_addr0}/\code{tb_page_addr1} 两处都登记；guest 写入某个代码页时，\code{tb_invalidate_phys_page} 以该页为范围，沿 \codeplain{PageDesc} 链表把落在页内的 TB 全部作废（TB 被删掉，其占用的宿主代码空间随之回收）。系统模拟下还有一层联动：自修改代码的写入通过 MMU 的写保护触发，失效受影响的 TB 之后还要撤销指向它们的直接块链接，否则被 patch 过的前驱 TB 会继续跳到已作废的旧代码。
+\end{enumerate}
+
+这两类结构都不是「物理地址索引的缓存」：软件 TLB 的键是 guest 虚拟页 + MMU 上下文，\codeplain{PageDesc} 索引的键是 guest 物理代码页，而执行入口的查找键又是 guest PC——三种不同的键服务于三种不同的失效来源，把它们统称一个名字会掩盖机制差别。
 
 \subsection{中断虚拟化：从设备事件到guest异常入口}\label{sec:software-irq}
 
 没有任何真实 RISC-V 中断控制器的条件下，异步中断靠一条贯穿软件各层的事件链实现，它从设备状态一路走到 guest 的中断处理程序。事件源可以是串口收到字符、块设备完成请求，也可以是虚拟定时器到期，它们都表现为设备模型内部的一次状态更新。控制器层由 PLIC 与 CLINT 两个模型承担：PLIC 维护外部中断源的优先级、使能与 pending 位，并提供 claim/complete 接口；CLINT 提供所选平台的本地定时器与软件中断能力\cite{source3}。
 
-通知路径是分层的。设备模型通过 \code{qemu_irq} 电平把事件递给控制器，PLIC 在 \code{sifive_plic_update} 里按优先级、使能、未 claim 三个条件逐 hart 挑选应上报的中断，再用 \code{qemu_set_irq} 拉高该 hart 的外部中断输入\footnote{QEMU: \path{hw/intc/sifive_plic.c}，\code{sifive_plic_update()}。}。中断输入的变化最终反映到 CPU 的 pending 状态：\code{riscv_cpu_update_mip} 更新 \code{mip} 寄存器并调用 \code{cpu_interrupt} 置起 \code{CPU_INTERRUPT_HARD}\footnote{QEMU: \path{target/riscv/tcg/cpu_helper.c}，\code{riscv_cpu_update_mip()}。}。此时若 vCPU 正忙于执行翻译代码，还需要 \code{tcg_handle_interrupt} 在非本线程上下文中调用 \code{qemu_cpu_kick} 唤醒或打断该线程\footnote{QEMU: \path{accel/tcg/tcg-accel-ops.c}，\code{tcg_handle_interrupt()}。}。
+通知与投递是两层不同的逻辑，下面分两个代码块看。代码块~\ref{lst:softirq-notify} 是第一层：设备事件如何变成 guest 可见的 pending 状态。
 
-投递路径则是架构层面的决策。返回公共执行循环后，\code{cpu_handle_interrupt()} 按需调用 RISC-V 目标的 \code{riscv_cpu_exec_interrupt}，它读取 pending、屏蔽位、委托关系与当前特权级，判断该 hart 此刻是否应接收某个中断；应接收时置起异常索引并调用 \code{riscv_cpu_do_interrupt}，由后者记录架构规定的异常返回信息、更新异常相关 CSR、切换特权级并改写 PC，进入 guest 的中断处理入口\footnote{QEMU: \path{target/riscv/tcg/cpu_helper.c}，\code{riscv_cpu_exec_interrupt()}。}。把事件置 pending、打断翻译代码执行、进入架构异常这三步分开是理解本节的关键：置 pending 是设备与控制器的状态变化，kick 是宿主线程调度层面的打断，架构投递才是 guest 状态机的一次转移。TB 链仍须响应异步退出请求。通常，\code{gen_tb_start()} 在生成代码入口插入一个轻量退出检查，通知路径改变相应状态，使后续代码返回公共循环，再做完整的架构中断判断；\code{CF_NOIRQ} 等特殊执行设置可以抑制该检查。因而“检查是否退出”与“完整仲裁并注入 guest 中断”是两层工作，不能用每 TB 全量轮询或完全不检查来概括\footnote{QEMU: \path{accel/tcg/translator.c}，\code{gen_tb_start()}；\path{accel/tcg/tcg-accel-ops.c}，\code{tcg_handle_interrupt()}。}\cite{source3}。
+\begin{lstlisting}[caption={第一层 通知：设备事件 $\rightarrow$ 控制器状态 $\rightarrow$ guest 的 mip（Python 伪代码，按 QEMU hw/intc/sifive\_plic.c 与 riscv\_cpu\_set\_irq 整理）},label={lst:softirq-notify}]
+def device_raise_irq(dev, irq_line):
+    """设备事件 -> 控制器输入。串口收字符、块设备完成、定时器到期都走这里"""
+    qemu_set_irq(dev.irq_out[irq_line], 1)  # 拉高电平，递给控制器
 
-本地定时器使用 QEMU 的虚拟时钟作为软件时间源。所选 CLINT 兼容布局复用 ACLINT 的定时器实现：读取时间时将 \code{QEMU_CLOCK_VIRTUAL} 换算为设备计数，写比较器时更新到期事件；比较条件已满足则立即置起定时器中断，否则在回调中置位\footnote{QEMU: \path{hw/intc/riscv_aclint.c}，\code{cpu_riscv_read_rtc_raw()}、\code{riscv_aclint_mtimer_write_timecmp()} 与 \code{riscv_aclint_mtimer_cb()}。}。这种计时模型不等于默认保证确定性重放。宿主唤醒机制与 guest 中断身份仍是两个不同层面的对象\cite{source3}。
 
-\input{figures/software-interrupt.tex}
+def sifive_plic_update(plic):
+    """PLIC 逐 (hart, M/S 模式) 重算电平：使能过、且尚未被 claim 才上报"""
+    for addr in plic.addr_config:
+        level = sifive_plic_claimed(plic, addr)  # 该 hart 此刻是否有可上报中断
+        qemu_set_irq(plic.ext_irqs[addr.hartid], level)
 
-图~\ref{fig:softirq} 以串口接收为例给出时序：字符到达→PLIC 置 pending 并选优→hart 中断输入拉高→TCG 退出或 kick→CPU 判断接收→guest handler 执行→claim/complete 回写控制器。这条链把三个层次的介入点都标了出来，说明软件中断虚拟化的代价主要分布在控制器状态维护与每次投递判断上。
+
+def riscv_cpu_set_irq(cpu, irq, level):
+    """中断线状态落到 CPU：写 guest 可见的 mip，并请求 TCG 退出"""
+    env = cpu.env
+    env.mip = update_bit(env.mip, irq, level)  # guest 稍后读到的 pending 位
+    if level:
+        cpu_interrupt(cpu, CPU_INTERRUPT_HARD)  # 请求打断正在执行的翻译代码
+\end{lstlisting}
+
+到此为止 guest 还没有被切换：它的 \code{mip} 里多了一个 pending 位，仅此而已。真正让 vCPU 停下来的动作属于第二层——代码块~\ref{lst:softirq-kick} 是宿主调度侧的 kick，代码块~\ref{lst:softirq-deliver} 才是回到公共循环之后的架构仲裁。
+
+\begin{lstlisting}[caption={第二层 打断：宿主线程调度侧的 kick 与 TB 出口检查（Python 伪代码，按 QEMU accel/tcg/tcg-accel-ops.c 与 translator.c 整理）},label={lst:softirq-kick}]
+def tcg_handle_interrupt(cpu, mask):
+    """可能在 iothread 上下文被调用：唤醒或打断目标 vCPU 线程"""
+    cpu_set_interrupt(cpu, mask)  # 记到 cpu->interrupt_request
+    if not qemu_cpu_is_self(cpu):
+        qemu_cpu_kick(cpu)  # 非本线程：唤醒/打断该 vCPU 线程
+    else:
+        cpu.neg.icount_decr.u16.high = -1  # 本线程：置 icount，让 TB 入口检查发现
+
+
+def gen_tb_start_check(cpu):
+    """每个 TB 入口的轻量退出检查（CF_NOIRQ 可抑制）"""
+    if cpu.neg.icount_decr.u32 < 0:  # 有人请求退出
+        return TB_EXIT_TO_MAIN_LOOP  # 回公共执行循环
+    return TB_CONTINUE
+\end{lstlisting}
+
+回到公共循环之后才做完整仲裁，见代码块~\ref{lst:softirq-deliver}。
+
+\begin{lstlisting}[caption={第二层 投递：架构仲裁与 guest 状态机转移（Python 伪代码，按 QEMU target/riscv/tcg/cpu\_helper.c 整理）},label={lst:softirq-deliver}]
+def cpu_handle_interrupt(cpu):
+    """公共执行循环里调用：判断此刻是否真的该把中断交给 guest"""
+    if not (cpu.interrupt_request & (CPU_INTERRUPT_HARD | CPU_INTERRUPT_RNMI)):
+        return False
+    irqno = riscv_cpu_local_irq_pending(cpu.env)  # 读 pending/mie/mideleg/hedeleg + 特权级
+    if irqno < 0:
+        return False  # 有请求但当前被屏蔽或已委托，不能收
+    cpu.exception_index = RISCV_EXCP_INT_FLAG | irqno
+    riscv_cpu_do_interrupt(cpu)  # 写 scause/sepc/stval、切特权级、跳 stvec
+    return True
+\end{lstlisting}
+
+三个代码块合起来是三个层次的完整链条：
+
+\begin{enumerate}[label=\arabic*.,leftmargin=2.5em,itemsep=2pt]
+\item \textbf{控制器状态变化}：设备拉电平、PLIC 算出哪个 hart 该收到中断、\code{riscv_cpu_set_irq} 把结果写进 guest 可见的 \code{mip}——guest 的中断挂起状态变了，但执行流还没变。
+\item \textbf{宿主线程调度}：\code{tcg_handle_interrupt} 在 iothread 上下文里用 \code{qemu_cpu_kick} 唤醒或打断正忙于执行翻译代码的 vCPU 线程；\code{gen_tb_start_check} 是它在生成代码侧的落点，每个 TB 入口插一条轻量检查，发现有人请求退出就回公共循环。
+\item \textbf{架构投递}：\code{cpu_handle_interrupt} 调用目标实现 \code{riscv_cpu_exec_interrupt}，由 \code{riscv_cpu_local_irq_pending} 读 pending、\code{mie}、\code{mideleg}、\code{hedeleg} 与当前特权级做仲裁，判为应接收才置异常索引、进 \code{riscv_cpu_do_interrupt} 完成 guest 状态机的一次转移。
+\end{enumerate}
+
+这个分层的实际意义在开销上：退出检查便宜、每个 TB 入口都做；完整仲裁昂贵、只在真正回到公共循环后做一次。既不能说 QEMU 每 TB 全量轮询中断，也不能说它完全不检查——请求会挂起在 \code{mip} 与 \code{interrupt_request} 里，直到某个 TB 边界主动退出。
+
+本地定时器走的是同一条链，只是事件源换成虚拟时钟。所选 CLINT 兼容布局复用 ACLINT 的定时器：读时间时把 \code{QEMU_CLOCK_VIRTUAL} 按 timebase 换算成设备计数，写比较器时更新到期事件，比较条件已满足就立即置起定时器中断、否则在回调中置位。这套计时模型不等于默认保证确定性重放——宿主何时唤醒 vCPU、guest 何时看到中断，仍是两个不同层面的对象。
 
 \subsection{设备虚拟化：MMIO、软件DMA与后端服务}\label{sec:software-dev}
 
 一个设备除了寄存器本身，还必须模拟三个方向的行为：CPU 到设备的控制路径、设备到内存的数据路径、设备回 CPU 的完成通知。
 
-控制路径由 MMIO 分发实现。guest 对设备寄存器所在地址的读写，先经物理地址空间定位到 MMIO 区域，再转交 \code{MemoryRegionOps} 里注册的回调。以 NS16550 兼容串口为例，\code{serial_mm_write} 把写值裁到 8 位后送入 \code{serial_io_ops}，寄存器写会改变内部状态并可能触发字符后端动作，寄存器读则返回当前状态\footnote{QEMU: \path{hw/char/serial-mm.c}，\code{serial_mm_write()}。}。也就是说，MMIO 分发把一次 guest 设备寄存器写转换为对设备状态机的调用，而不是先对某个真实 MMIO 地址进行宿主写操作，guest 看到的只是一个"存在寄存器"的串口，后端连的是字符设备、管道还是文件由 QEMU 配置决定。
+控制路径由 MMIO 分发实现：guest 对设备寄存器地址的读写，先经物理地址空间定位到 MMIO 区域，再转交 \code{MemoryRegionOps} 里注册的回调。代码块~\ref{lst:mmio-ctrl} 以 NS16550 兼容串口为例给出这条控制路径。
 
-数据路径以 virtio-blk 展开。guest 通过 virtqueue 提交描述符链，QEMU 在 \path{virtio_blk_handle_vq} 里取请求、解析描述符，把块后端处理结果写回 guest 内存，最后在 \path{virtio_blk_req_complete} 里写状态字节、\code{virtqueue_push} 归还描述符并 \code{virtio_notify} 通知 guest\footnote{QEMU: \path{hw/block/virtio-blk.c}，\code{virtio_blk_handle_vq()}、\code{virtio_blk_req_complete()}。}。这里的数据搬运是软件 DMA：设备通过自己的 \code{AddressSpace} 访问 guest 内存，直接使用 guest 物理地址到宿主缓冲区的映射，并不自动套用某个 guest 进程的 CPU 页表；只有当配置了 vIOMMU 时，设备地址才会额外经过一次设备地址转换\cite{source3}。区分"软件 DMA 走设备地址空间"与"CPU 访存走 CPU 页表"是理解设备与内存两层如何分工的要点。完成通知则是回接上一节：请求完成后设备更新队列状态，需要时拉起中断，走 PLIC 与架构投递回到 guest。
+\begin{lstlisting}[caption={控制路径：一次 guest MMIO 读写如何落到设备状态机（Python 伪代码，按 QEMU softmmu/memory.c 与 hw/char/serial-mm.c 整理）},label={lst:mmio-ctrl}]
+def address_space_dispatch(as_, pa, size, is_write, value):
+    """guest 物理地址 -> MemoryRegion -> 该设备的 MemoryRegionOps 回调"""
+    mr, offset = address_space_translate(as_, pa, size)  # 查 MemoryRegion 图
+    if is_write:
+        return mr.ops.write(mr.opaque, offset, value, size)  # 设备自己的写回调
+    return mr.ops.read(mr.opaque, offset, size)  # 设备自己的读回调
+
+
+def serial_mm_write(opaque, addr, value, size):
+    """NS16550 兼容串口：MMIO 写 -> 串口状态机（不是写宿主某个物理地址）"""
+    s = SERIAL_MM(opaque)
+    value &= 255  # 裁到 8 位
+    serial_io_ops.write(&s.serial, addr >> s.regshift, value, 1)
+    # 内部状态改变，可能触发字符后端动作（stdio / pipe / file，由 QEMU 配置决定）
+
+
+def serial_mm_read(opaque, addr, size):
+    """MMIO 读：从设备状态机取当前值"""
+    s = SERIAL_MM(opaque)
+    return serial_io_ops.read(&s.serial, addr >> s.regshift, 1)
+\end{lstlisting}
+
+关键在于：MMIO 分发把一次 guest 设备寄存器写转换为对设备状态机的调用，而不是先对某个真实 MMIO 地址做宿主写操作。guest 看到的只是一个"存在寄存器"的串口，后端连的是字符设备、管道还是文件，完全由 QEMU 配置决定。
+
+数据路径则以 virtio-blk 展开，代码块~\ref{lst:virtio-blk} 给出从 virtqueue 到完成通知的全流程。
+
+\begin{lstlisting}[caption={数据路径：virtio-blk 从 virtqueue 取请求到完成通知（Python 伪代码，按 QEMU hw/block/virtio-blk.c 整理）},label={lst:virtio-blk}]
+def virtio_blk_handle_vq(s, vq):
+    """guest kick 之后：从 virtqueue 取描述符链，逐条处理"""
+    while (req := virtio_blk_get_request(s, vq)) is not None:
+        # 解析描述符链：请求头 + 数据缓冲 + 状态字节
+        if virtio_blk_handle_request(req, mrb) != 0:
+            virtqueue_detach_element(req.vq, req.elem)  # 请求非法，丢弃
+            break
+    if mrb.num_reqs:
+        virtio_blk_submit_multireq(s, mrb)  # 合并相邻请求，批量提交
+
+
+def virtio_blk_handle_request(req, mrb):
+    """按请求类型分派：读/写走块后端，其他走配置路径"""
+    if req.type == VIRTIO_BLK_T_IN:  # guest 读
+        blk_aio_preadv(s.blk, req.sector << 9, req.qiov,
+                       flags, virtio_blk_rw_complete, req)
+        # 注意：数据直接搬进 guest 内存的描述符缓冲（软件 DMA），
+        # 走设备自己的 AddressSpace，不套用 guest 进程的 CPU 页表
+    ...
+
+
+def virtio_blk_rw_complete(opaque, ret):
+    """块后端完成回调：写状态字节 + 归还描述符 + 通知 guest"""
+    req = opaque
+    virtio_blk_req_complete(req, VIRTIO_BLK_S_OK if ret == 0 else VIRTIO_BLK_S_IOERR)
+
+
+def virtio_blk_req_complete(req, status):
+    """完成路径（hw/block/virtio-blk.c）"""
+    stb_p(&req.in.status, status)  # 状态字节写回 guest 内存
+    virtqueue_push(req.vq, &req.elem, req.in_len)  # 描述符归还 used 环
+    virtio_notify(vdev, req.vq)  # 需要时拉起中断 -> PLIC -> 架构投递
+\end{lstlisting}
+
+这里的数据搬运是软件 DMA：设备通过自己的 \code{AddressSpace} 访问 guest 内存，直接使用 guest 物理地址到宿主缓冲区的映射，并不自动套用某个 guest 进程的 CPU 页表；只有配置了 vIOMMU 时，设备地址才会额外经过一次设备地址转换。区分"软件 DMA 走设备地址空间"与"CPU 访存走 CPU 页表"是理解设备与内存两层如何分工的要点。完成通知则回接上一节：\code{virtio_notify} 在需要时拉起中断，走 PLIC 与架构投递回到 guest。
 
 最后要区分两种设备接口。模拟现有硬件接口（如 NS16550、PCI 设备）与 virtio 这类半虚拟化设备接口，都能由 QEMU 的软件后端提供服务，差别只在 guest 侧协议与性能；virtio 不是 CPU 硬件虚拟化指令，也不要求 CPU 必须用 KVM 执行，它只是约定了一套更利于软件实现高效 I/O 的接口。具体到 virtio-blk，virtqueue 组织请求与完成信息。以 split virtqueue 为例，guest 写好描述符链、更新 avail 环并按通知规则发出 kick，设备侧读描述符、执行后端、把结果写回 guest 内存、再写 used 环并按协商的通知规则决定是否产生中断，二者通过共享内存环而非真实总线握手来传递请求与完成状态。两者在"由谁实现设备、guest 如何发现与驱动"上不同，在"都是软件模型"这一点上相同。
 
