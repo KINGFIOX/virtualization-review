@@ -45,7 +45,7 @@ if missing_refs: errors.append('Unknown reference labels: '+str(missing_refs))
 duplicates = [key for key,n in Counter(labels).items() if n>1]
 if duplicates: errors.append('Duplicate labels: '+str(duplicates))
 chapters = {}
-for name in ['00-intro','01-software','02-hardware','03-nested']:
+for name in ['00-intro','01-software','02-hardware','03-turtles','04-hyperturtle']:
     text = texts.get('chapters/'+name+'.tex','')
     sections = re.findall(r'\\section\{([^}]+)\}',text)
     subsections = re.findall(r'\\subsection\{([^}]+)\}',text)

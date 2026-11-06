@@ -4,6 +4,7 @@
 正文要连续论述和机制解释，不是要点提纲，不得写“待补”“待核验”或假造实测。
 
 输出文件：/home/ubuntu/高级操作系统教程/virtualization-review/chapters/03-nested.tex
+（编辑后已拆分为 chapters/03-turtles.tex 与 chapters/04-hyperturtle.tex；本文件仅作调用记录保留）
 写第3部分x86-64嵌套虚拟化及主论文评议，目标5000–6500汉字，HyperTurtle至少占本章一半。
 读取新提纲第169–262行、/home/ubuntu/高级操作系统教程/virtualization-review/editorial/evidence-nested-turtles.md、/home/ubuntu/高级操作系统教程/virtualization-review/editorial/evidence-hyperturtle.txt；必要时读取同目录hyperturtle-full.txt。若文本超过单次读取限制要分段读完所需部分。
 输出以\section{嵌套虚拟化：从Turtles到HyperTurtle}\label{sec:nested}开头。

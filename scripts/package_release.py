@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 verification = json.loads((ROOT/'build/verification.json').read_text())
 if not verification.get('passed'):
     raise SystemExit('Run and pass verify_latex.py before packaging')
+# Writer job names (logs/*-usage.json), not chapter file stems: the 03-nested job
+# produced chapters/03-turtles.tex and chapters/04-hyperturtle.tex after the editorial split.
 expected = ['00-intro','01-software','02-hardware','03-nested','frontmatter-conclusion']
 usage = {}
 for stem in expected:
