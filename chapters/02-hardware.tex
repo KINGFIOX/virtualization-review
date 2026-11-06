@@ -60,7 +60,7 @@ struct kvm_arch {
 
 \subsection{CPU虚拟化：EL2、选择性陷入与vCPU上下文}\label{sec:hardware-cpu}
 
-Arm 虚拟化的基本布局由异常级（Exception level）刻画。guest 的内核运行于 EL1、其应用程序运行于 EL0，二者合起来构成一个虚拟机（virtual machine）；hypervisor 运行于更特权的 EL2，负责在多个虚拟机之间切换\cite{source4}。EL2 为 guest 管理提供独立的控制寄存器与异常入口。guest 仍以 EL1 的接口建立页表、处理异常；它可以知道自己位于虚拟机中，也可以在大部分路径上无需感知 hypervisor，是否知情并非资源隔离的前提\cite{source4}。这一布局回答了"谁控制谁"：guest 控制的是 EL1/EL0 这一份状态，hypervisor 通过 EL2 控制系统资源的分发与回收，并为每个虚拟机分配一个 VMID 以在有关地址转换缓存中区分不同虚拟机的转换上下文。
+Arm 虚拟化的基本布局由异常级（Exception level）刻画。guest 的内核运行于 EL1、其应用程序运行于 EL0，二者合起来构成一个虚拟机（virtual machine）；hypervisor 运行于更特权的 EL2，负责在多个虚拟机之间切换\cite{source4}。EL2 为 guest 管理提供独立的控制寄存器与异常入口。guest 仍以 EL1 的接口建立页表、处理异常；它可以知道自己位于虚拟机中，也可以在大部分路径上无需感知 hypervisor，是否知情并非资源隔离的前提\cite{source4}。这一布局回答了“谁控制谁”：guest 控制的是 EL1/EL0 这一份状态，hypervisor 通过 EL2 控制系统资源的分发与回收，并为每个虚拟机分配一个 VMID 以在有关地址转换缓存中区分不同虚拟机的转换上下文。
 
 让 guest 直接执行、又保留 hypervisor 控制权的关键是选择性陷入。EL2 提供一组控制寄存器决定哪些操作在 guest 态直接生效、哪些操作产生异常并送入 EL2，其中枢是 \code{HCR_EL2}。它逐位配置各条陷入路径，例如 \code{HCR_EL2.VM} 打开 Stage-2 内存翻译（详见下节），若干陷阱位决定 guest 访问某类系统寄存器、执行某条指令时是否陷入。于是敏感操作不必像软件方案那样由翻译器逐条识别，而是由硬件在指令执行处直接判定并转交 EL2。反过来，EL2 也能把少量标识寄存器对 guest 虚拟化：guest 读这些寄存器得到的是 hypervisor 预设的虚拟值，从而向 guest 呈现一个与其真实宿主不尽相同的处理器面貌\cite{source4}。这些机制允许普通执行路径保留原生指令，而把需要管理的操作集中到受控的异常与状态虚拟化接口，避免软件翻译全部 guest 指令。
 
@@ -121,7 +121,7 @@ struct kvm_cpu_context {
 
 这份结构直接对应切换路径上的装载与回收。\code{ctxt} 是 guest 状态的软件权威副本，\code{regs} 与 \code{sys_regs} 里的内容在 vCPU 进入前由 \code{__guest_enter} 逐批恢复进物理寄存器，退出时再存回；\code{hcr_el2} 则是“下次切换时该写什么陷入配置”的缓存，vCPU 间的隔离在虚拟接口层由 \code{vgic_cpu}、在内存层由 \code{hw_mmu} 分别承接。因此 EL2 的陷入位和这份结构互为表里：陷入位决定哪些操作会打断 guest，vCPU 对象决定打断之后现场放在哪里、以及何时以何种状态重新进入。
 
-一次完整的运行闭环由硬件与软件分段完成。异常进入目标异常级时，硬件只自动保存恢复所必需的最小信息：处理器的当前状态（PSTATE 及各中断屏蔽位）存入 \code{SPSR_EL2}，异常首选返回地址存入 \code{ELR_EL2}，同步异常或 SError 的原因码写入 \code{ESR_EL2}\cite{source4}。也就是说，硬件记录的是"从哪来、为什么来、处于什么状态"这组返回线索，并不代管通用寄存器。KVM 在 \code{kvm_arch_vcpu_ioctl_run} 里沿 \code{KVM_RUN} ioctl 组织起 vCPU 的完整生命周期：QEMU 进程（宿主用户态）发起运行请求，内核经 \code{kvm_call_hyp_ret} 把 vCPU 上下文交给 EL2 的 \code{__kvm_vcpu_run}，后者逐批恢复 guest 的通用寄存器与系统寄存器，最后执行 \code{eret} 把控制权从 EL2 交回 EL1/EL0\footnote{Linux: \path{arch/arm64/kvm/arm.c}，\code{kvm_arch_vcpu_ioctl_run()}；\path{arch/arm64/kvm/hyp/entry.S} 中的 guest 寄存器保存/恢复与 \code{eret}。}。guest 触发被配置为退出的操作或事件后，处理器进入 EL2 异常向量，KVM 的入口代码保存必要状态并进入相应退出路径。KVM 先区分退出类型；同步异常等需要进一步解码的情况再使用 \code{ESR_EL2}，不能用旧的 ESR 值解释所有 IRQ 退出。硬件保存的那组最小信息与 KVM 软件维护的完整 vCPU 上下文之间因此存在明确分工：SPSR/ELR/ESR 是硬件保证的返回线索，GPR、浮点及系统寄存器状态的维护由软件负责，并可采用按需保存或延迟切换等优化，不能笼统说"所有现场均由硬件自动保存"\cite{source4,source5}。
+一次完整的运行闭环由硬件与软件分段完成。异常进入目标异常级时，硬件只自动保存恢复所必需的最小信息：处理器的当前状态（PSTATE 及各中断屏蔽位）存入 \code{SPSR_EL2}，异常首选返回地址存入 \code{ELR_EL2}，同步异常或 SError 的原因码写入 \code{ESR_EL2}\cite{source4}。也就是说，硬件记录的是“从哪来、为什么来、处于什么状态”这组返回线索，并不代管通用寄存器。KVM 在 \code{kvm_arch_vcpu_ioctl_run} 里沿 \code{KVM_RUN} ioctl 组织起 vCPU 的完整生命周期：QEMU 进程（宿主用户态）发起运行请求，内核经 \code{kvm_call_hyp_ret} 把 vCPU 上下文交给 EL2 的 \code{__kvm_vcpu_run}，后者逐批恢复 guest 的通用寄存器与系统寄存器，最后执行 \code{eret} 把控制权从 EL2 交回 EL1/EL0\footnote{Linux: \path{arch/arm64/kvm/arm.c}，\code{kvm_arch_vcpu_ioctl_run()}；\path{arch/arm64/kvm/hyp/entry.S} 中的 guest 寄存器保存/恢复与 \code{eret}。}。guest 触发被配置为退出的操作或事件后，处理器进入 EL2 异常向量，KVM 的入口代码保存必要状态并进入相应退出路径。KVM 先区分退出类型；同步异常等需要进一步解码的情况再使用 \code{ESR_EL2}，不能用旧的 ESR 值解释所有 IRQ 退出。硬件保存的那组最小信息与 KVM 软件维护的完整 vCPU 上下文之间因此存在明确分工：SPSR/ELR/ESR 是硬件保证的返回线索，GPR、浮点及系统寄存器状态的维护由软件负责，并可采用按需保存或延迟切换等优化，不能笼统说“所有现场均由硬件自动保存”\cite{source4,source5}。
 
 这里把 x86 语境中的 VM entry/VM exit 在 AArch64 KVM 里的两个具体落点展示出来：vmentry 是 \code{__guest_enter} 末尾把控制权交回 EL1/EL0 的那条 \code{eret}；vmexit 是硬件按 \code{VBAR_EL2} 进入 EL2 向量表、由 \code{__guest_exit} 保存现场的那一段。进入侧如代码块~\ref{lst:arm-vmentry} 所示：EL2 一侧此时已把宿主自身的现场存好，这里逐批把 guest 寄存器从 vCPU 结构装进物理寄存器，\code{eret} 依据 \code{SPSR_EL2}/\code{ELR_EL2} 把处理器送回 guest 的 EL1 或 EL0——vmentry 的硬件动作只有这一条指令，寄存器装载正是前文 \code{kvm_cpu_context} 结构存在的理由。
 
@@ -246,7 +246,7 @@ el1\_error & 向量入口即区分 & handle\_exit\_early，注入或按策略处
 
 guest 可以自由改写自己的页表，却无法越过 hypervisor 划定的内存边界，原因在于访存翻译被拆成两位管理者各自负责的一段。
 地址关系是三层：guest 虚拟地址（VA）经 Stage-1 翻译为中间物理地址（IPA），IPA 再经 Stage-2 翻译为真实物理地址（PA）。
-guest 操作系统管理 Stage-1，它把 IPA 当作自己的"物理地址"，据此建立页表、分配页面；
+guest 操作系统管理 Stage-1，它把 IPA 当作自己的“物理地址”，据此建立页表、分配页面；
 hypervisor 管理 Stage-2，把各 guest 的 IPA 映射到真实物理内存\cite{source4}。
 Stage-1 的控制结构是 guest 侧的系统寄存器——\code{TTBR0_EL1}/\code{TTBR1_EL1} 给出两个 VA 区域的页表基址（Linux 通常将其分别用于用户与内核地址区域），\code{TCR_EL1} 给出页表粒度与地址空间布局；
 Stage-2 的控制结构则在 EL2——\code{VTTBR_EL2} 给出 Stage-2 页表基址，\code{VTCR_EL2} 给出其粒度与输出地址宽度。
@@ -256,7 +256,7 @@ Stage-2 的控制结构则在 EL2——\code{VTTBR_EL2} 给出 Stage-2 页表基
 只有 EL1\&0 翻译体制带 Stage-2。hypervisor 自身的访存不经过 Stage-2：它走自己的 stage-1 页表——传统布局（\code{HCR_EL2.E2H}=0）下是 \code{TTBR0_EL2}，VHE 布局下按 EL2\&0 体制由 \code{TTBR0_EL2}/\code{TTBR1_EL2} 分高低地址范围；
 两套路径都不使用 \code{VTTBR_EL2}，因为该寄存器只承载“替 guest 做 IPA→PA 翻译”的那套 Stage-2 页表\cite{source4}。
 
-两阶段组合翻译并不意味着"免费"。当所需转换未在缓存中命中时，处理器需要执行页表遍历（page walk）；
+两阶段组合翻译并不意味着“免费”。当所需转换未在缓存中命中时，处理器需要执行页表遍历（page walk）；
 Stage-1 页表项的读取还可能触发 Stage-2 遍历，因此代价并非简单地串行查两张表；
 把翻译结果缓存进 TLB 后，命中路径才接近单次直接访存的成本。
 TLB 条目按地址空间标识区分：Stage-1 的 ASID 区分同一 guest 内的不同地址空间，VMID 区分不同虚拟机，使多 guest 切换时不必整表失效。
@@ -264,7 +264,7 @@ TLB 条目按地址空间标识区分：Stage-1 的 ASID 区分同一 guest 内�
 因此与 QEMU 每次访存执行软件 TLB 检查的路径相比，硬件辅助把转换缓存查询与未命中遍历交给 MMU，
 但两阶段遍历与失效维护的代价并未消失，只是从软件高频路径转移到了硬件分页单元与偶发的慢路径上\cite{source4,source5}。
 
-缺页与 MMIO 的处理由 KVM 的 \code{kvm_handle_guest_abort} 承接，它依据 \code{ESR_EL2} 里的故障分类把异常分流。对合法 guest RAM 的 Stage-2 缺页，KVM 沿 memory slot 把 IPA 换算成 QEMU 进程提供的宿主虚拟地址后备，再填充 Stage-2 页表完成映射；这一路径上 guest Stage-1 缺页与 Stage-2 缺页的责任是分开的——正常的 Stage-1 fault 通常直接由 guest 的异常处理程序接收，无须先退出给 KVM；Stage-2 fault 才需要 hypervisor 处理。KVM 在其他异常条件下也可能向 guest 注入异常，二者不应混淆\footnote{Linux: \path{arch/arm64/kvm/mmu.c}，\code{user_mem_abort()} 与故障分流。}。对 MMIO 区间则另走一路：guest 对设备寄存器 IPA 的访问没有对应内存后备，KVM 先尝试用内核的 \code{kvm_io_bus} 在宿主侧完成读写，成功则不再惊动 QEMU 进程；只有内核侧无人认领该地址时，才把 \code{exit_reason} 置为 \code{KVM_EXIT_MMIO}，连同地址与数据一起交回 QEMU 进程\footnote{Linux: \path{arch/arm64/kvm/mmio.c}，\code{io_mem_abort()} 及 \code{KVM_EXIT_MMIO} 的构造。}。因此"guest 退出"与"回到 QEMU"是两件事：一次 MMIO 访问若被内核的 io bus 处理，vCPU 全程不离开内核，也就谈不上每次都回 QEMU。这再次把"何时介入、介入到哪一层"写进了具体路径。
+缺页与 MMIO 的处理由 KVM 的 \code{kvm_handle_guest_abort} 承接，它依据 \code{ESR_EL2} 里的故障分类把异常分流。对合法 guest RAM 的 Stage-2 缺页，KVM 沿 memory slot 把 IPA 换算成 QEMU 进程提供的宿主虚拟地址后备，再填充 Stage-2 页表完成映射；这一路径上 guest Stage-1 缺页与 Stage-2 缺页的责任是分开的——正常的 Stage-1 fault 通常直接由 guest 的异常处理程序接收，无须先退出给 KVM；Stage-2 fault 才需要 hypervisor 处理。KVM 在其他异常条件下也可能向 guest 注入异常，二者不应混淆\footnote{Linux: \path{arch/arm64/kvm/mmu.c}，\code{user_mem_abort()} 与故障分流。}。对 MMIO 区间则另走一路：guest 对设备寄存器 IPA 的访问没有对应内存后备，KVM 先尝试用内核的 \code{kvm_io_bus} 在宿主侧完成读写，成功则不再惊动 QEMU 进程；只有内核侧无人认领该地址时，才把 \code{exit_reason} 置为 \code{KVM_EXIT_MMIO}，连同地址与数据一起交回 QEMU 进程\footnote{Linux: \path{arch/arm64/kvm/mmio.c}，\code{io_mem_abort()} 及 \code{KVM_EXIT_MMIO} 的构造。}。因此“guest 退出”与“回到 QEMU”是两件事：一次 MMIO 访问若被内核的 io bus 处理，vCPU 全程不离开内核，也就谈不上每次都回 QEMU。这再次把“何时介入、介入到哪一层”写进了具体路径。
 
 \subsection{中断虚拟化：KVM、虚拟ITS与GICv4的直接注入}\label{sec:hardware-irq}
 
@@ -281,7 +281,7 @@ TLB 条目按地址空间标识区分：Stage-1 的 ASID 区分同一 guest 内�
 
 这张图是运行时查表路径，不是配置命令流。各张表由 ITS 命令队列建立与维护：MAPD 把 DeviceID 映射到 ITT，MAPTI 把 EventID 翻译为物理 LPI 的 pINTID/CollectionID 或虚拟 LPI 的 vINTID/vPEID，MAPC 建立 Collection table，GICv4 另有 VMAPP/VMAPTI 建立 vPE 与虚拟映射\cite{source9}。运行时硬件按图查表，配置阶段软件发命令——两个平面在 ITS 上分离。
 
-图里的 vPE table 需要单独说清，因为它是"翻译出 vPEID 之后去哪"的答案。这张表本身在 ITS 的内存里（由 \code{GITS_BASER<n>} 指向，类型为 VCPU），每个表项由 vPEID 索引，内容就是两项：\textbf{目标 Redistributor} 与 \textbf{该 vPE 的 Virtual pending table 基址}——图中 vPE table 指向 Redistributor A 的那根粗箭头，含义正是"表项给出目标 Redistributor 及 pending 表地址"。在 KVM/ITS 驱动里，写这一行表项的动作就是向真实 ITS 发 \textbf{VMAPP 命令}，字段与图一一对应，见代码块~\ref{lst:vmapp}。
+图里的 vPE table 需要单独说清，因为它是“翻译出 vPEID 之后去哪”的答案。这张表本身在 ITS 的内存里（由 \code{GITS_BASER<n>} 指向，类型为 VCPU），每个表项由 vPEID 索引，内容就是两项：\textbf{目标 Redistributor} 与 \textbf{该 vPE 的 Virtual pending table 基址}——图中 vPE table 指向 Redistributor A 的那根粗箭头，含义正是“表项给出目标 Redistributor 及 pending 表地址”。在 KVM/ITS 驱动里，写这一行表项的动作就是向真实 ITS 发 \textbf{VMAPP 命令}，字段与图一一对应，见代码块~\ref{lst:vmapp}。
 
 \begin{lstlisting}[caption={vPE table 一行 = 一条 VMAPP 命令：its\_build\_vmapp\_cmd 的字段与图~\ref{fig:gic-its} 的对应（irq-gic-v3-its.c，节选）},label={lst:vmapp},style=pseudopy]
 # vPEID 由 its_vpe_init 里的 its_vpe_id_alloc() 分配；
@@ -301,7 +301,7 @@ def its_build_vmapp_cmd(vpe, collection):
 # vPE 迁到别的 Redistributor 用 VMOVP 只改 target，vPEID 与 pending 表不变
 \end{lstlisting}
 
-于是一个 vPE 的"硬件身份"就有了两处落点，且由两条不同命令维护：\textbf{vPE table 表项}（VMAPP 建立，回答"这个 vPEID 的 pending 表在哪、目标 Redistributor 是谁"，存在 ITS 侧）与 \textbf{Redistributor 持有的两页表}（驻留时写 \code{GICR_VPENDBASER}/\code{GICR_VPROPBASER}，回答"我现在该往哪置位"，存在 Redistributor 侧）。运行时硬件先用 vPEID 查 vPE table 找到 Redistributor，再由该 Redistributor 按自己寄存器里的基址置 pending 位——两条命令把同一份 vPE 状态分别挂到 ITS 与 Redistributor 上，图~\ref{fig:gic-its} 的查表路径才得以闭合。
+于是一个 vPE 的“硬件身份”就有了两处落点，且由两条不同命令维护：\textbf{vPE table 表项}（VMAPP 建立，回答“这个 vPEID 的 pending 表在哪、目标 Redistributor 是谁”，存在 ITS 侧）与 \textbf{Redistributor 持有的两页表}（驻留时写 \code{GICR_VPENDBASER}/\code{GICR_VPROPBASER}，回答“我现在该往哪置位”，存在 Redistributor 侧）。运行时硬件先用 vPEID 查 vPE table 找到 Redistributor，再由该 Redistributor 按自己寄存器里的基址置 pending 位——两条命令把同一份 vPE 状态分别挂到 ITS 与 Redistributor 上，图~\ref{fig:gic-its} 的查表路径才得以闭合。
 
 直接注入的关键在 Redistributor 一侧。Redistributor 内的 \code{GICR_VPENDBASER} 指向按 vPE 组织的虚拟 pending 表，据此判断目标 vPE 是否正驻留在自己上面：驻留则直接以 vINTID 注入 vPE，这条路径上 hypervisor 完全不参与——硬件完成查表、置 pending、经虚拟 CPU interface 呈现给 guest，没有一次退出到 EL2；未驻留则按映射里配置的 doorbell 产生一个物理中断 pINTID 通知 hypervisor，由它决定调度或唤醒\cite{source9,source11}。
 
@@ -322,11 +322,11 @@ struct its_vpe {
 };
 \end{lstlisting}
 
-硬件一层则是每个 vPE 对应的两页普通物理内存：\textbf{虚拟 pending 表}（\code{vpt_page}，每 vINTID 一个 pending 位）与\textbf{虚拟属性表}（\code{vprop_page}，每 vINTID 的优先级、使能、组）。让 Redistributor "拥有"这个 vPE 的方式，就是把这两页物理内存的基址分别写进它的 \code{GICR_VPENDBASER} 与 \code{GICR_VPROPBASER} 两个寄存器——驻留动作（\code{its_vpe_schedule}）正是如此：取 \code{vpt_page} 的物理地址、配上缓存与共享属性、置 Valid 位写入 \code{GICR_VPENDBASER}，属性表同样写入 \code{GICR_VPROPBASER}\footnote{Linux: \path{drivers/irqchip/irq-gic-v3-its.c}，\code{its_vpe_schedule()} 中对 \code{GICR_VPENDBASER}/\code{GICR_VPROPBASER} 的写入。}。写完之后，这个 Redistributor 就持有了该 vPE 的全部运行时状态：ITS 翻译出的 (vINTID, vPEID) 经 vPE table 找到它，由它直接在 \code{vpt_page} 里置 pending 位——硬件以类似 DMA 的方式读写这页内存，全程不经过任何软件。
+硬件一层则是每个 vPE 对应的两页普通物理内存：\textbf{虚拟 pending 表}（\code{vpt_page}，每 vINTID 一个 pending 位）与\textbf{虚拟属性表}（\code{vprop_page}，每 vINTID 的优先级、使能、组）。让 Redistributor “拥有”这个 vPE 的方式，就是把这两页物理内存的基址分别写进它的 \code{GICR_VPENDBASER} 与 \code{GICR_VPROPBASER} 两个寄存器——驻留动作（\code{its_vpe_schedule}）正是如此：取 \code{vpt_page} 的物理地址、配上缓存与共享属性、置 Valid 位写入 \code{GICR_VPENDBASER}，属性表同样写入 \code{GICR_VPROPBASER}\footnote{Linux: \path{drivers/irqchip/irq-gic-v3-its.c}，\code{its_vpe_schedule()} 中对 \code{GICR_VPENDBASER}/\code{GICR_VPROPBASER} 的写入。}。写完之后，这个 Redistributor 就持有了该 vPE 的全部运行时状态：ITS 翻译出的 (vINTID, vPEID) 经 vPE table 找到它，由它直接在 \code{vpt_page} 里置 pending 位——硬件以类似 DMA 的方式读写这页内存，全程不经过任何软件。
 
 因此驻留切换就是两层之间的同步点：\code{vgic_v4_load} 把两页的地址装进 Redistributor 寄存器，硬件开始直接投递；\code{vgic_v4_put} 清 Valid 位、把硬件攒下的状态收回软件并装 doorbell。vPE 的软件身份是 \code{its_vpe}（KVM 簿记），硬件身份是 \code{vpt_page}/\code{vprop_page} 两页内存，KVM 的维护工作就是建立映射、并在调度切换时把这两页装进或撤出 Redistributor。
 
-KVM 把这套硬件能力组织成"虚拟表 + 真实表"两层：guest 在虚拟 ITS 上建立的映射先落在软件结构里，再由 KVM 挑需要直接注入的那部分挂到真实 ITS 上，最后用驻留机制决定某条 vLPI 此刻能否直达。三个平面各对应一段代码，代码块~\ref{lst:vpe-lifecycle} 按 Linux 的实际函数给出示意。
+KVM 把这套硬件能力组织成“虚拟表 + 真实表”两层：guest 在虚拟 ITS 上建立的映射先落在软件结构里，再由 KVM 挑需要直接注入的那部分挂到真实 ITS 上，最后用驻留机制决定某条 vLPI 此刻能否直达。三个平面各对应一段代码，代码块~\ref{lst:vpe-lifecycle} 按 Linux 的实际函数给出示意。
 
 \begin{lstlisting}[caption={KVM 组织 GICv4 直接注入的三个平面：虚拟建表、挂载真实 ITS、驻留管理（依据 vgic-its.c / vgic-v4.c / irq-gic-v3-its.c 整理的示意）},label={lst:vpe-lifecycle},style=pseudopy]
 # ── 平面一：虚拟建表（控制面，GICv3/v4 共用）──
@@ -367,9 +367,9 @@ def vgic_v4_doorbell_handler(irq, vcpu):   # 未驻留期间有 vLPI 到达
     kvm_vcpu_kick(vcpu)                            # 唤醒 vCPU，待重新驻留
 \end{lstlisting}
 
-举一条具体的中断把三个平面串起来。假设 guest 里有一块直通的 NVMe 盘，驱动为队列 1 的 MSI 向量配置 \code{DeviceID=0x20}、\code{EventID=1}、\code{vINTID=8195}，目标是 \code{vPE 0}。建表阶段，guest 经虚拟 ITS 下发 MAPD/MAPTI，KVM 在软件表里记下 \code{(0x20, 1) → (vINTID 8195, vPE 0)}——这一步真实 ITS 还什么都不知道。挂载阶段，VFIO 为这块盘登记 MSI 路由，\code{kvm_vgic_v4_set_forwarding} 按 \code{(0x20, 1)} 查上面的软件表得到 vLPI，再经 \code{its_map_vlpi} 把"这条物理 MSI → vINTID 8195 + vPE 0"写进真实 ITS，等价于 VMAPP/VMAPTI。此后运行时分两种情形：\code{vPE 0} 正驻留时，盘完成一次 I/O 发出 MSI，真实 ITS 按图~\ref{fig:gic-its} 的路径翻译出 vINTID 8195、定位到 vPE 0 所在的 Redistributor，直接在其 \code{vpt_page} 里置 pending 位并注入 vCPU——全程没有一次退出到 EL2；若此刻 \code{vPE 0} 未驻留，同一条 MSI 则由真实 ITS 转为 doorbell 物理中断，\code{vgic_v4_doorbell_handler} 标记 pending 并唤醒 vCPU，待它下次被调度、重新驻留后再兑现。
+举一条具体的中断把三个平面串起来。假设 guest 里有一块直通的 NVMe 盘，驱动为队列 1 的 MSI 向量配置 \code{DeviceID=0x20}、\code{EventID=1}、\code{vINTID=8195}，目标是 \code{vPE 0}。建表阶段，guest 经虚拟 ITS 下发 MAPD/MAPTI，KVM 在软件表里记下 \code{(0x20, 1) → (vINTID 8195, vPE 0)}——这一步真实 ITS 还什么都不知道。挂载阶段，VFIO 为这块盘登记 MSI 路由，\code{kvm_vgic_v4_set_forwarding} 按 \code{(0x20, 1)} 查上面的软件表得到 vLPI，再经 \code{its_map_vlpi} 把“这条物理 MSI → vINTID 8195 + vPE 0”写进真实 ITS，等价于 VMAPP/VMAPTI。此后运行时分两种情形：\code{vPE 0} 正驻留时，盘完成一次 I/O 发出 MSI，真实 ITS 按图~\ref{fig:gic-its} 的路径翻译出 vINTID 8195、定位到 vPE 0 所在的 Redistributor，直接在其 \code{vpt_page} 里置 pending 位并注入 vCPU——全程没有一次退出到 EL2；若此刻 \code{vPE 0} 未驻留，同一条 MSI 则由真实 ITS 转为 doorbell 物理中断，\code{vgic_v4_doorbell_handler} 标记 pending 并唤醒 vCPU，待它下次被调度、重新驻留后再兑现。
 
-边界必须说清：直接注入只覆盖"已驻留 vPE 的 vLPI"这一热路径，映射配置、vCPU 调度、未驻留时的唤醒与控制面仍由软件完成，不能说成"所有中断都完全绕过 hypervisor"\cite{source9,source11}。
+边界必须说清：直接注入只覆盖“已驻留 vPE 的 vLPI”这一热路径，映射配置、vCPU 调度、未驻留时的唤醒与控制面仍由软件完成，不能说成“所有中断都完全绕过 hypervisor”\cite{source9,source11}。
 
 \subsection{设备虚拟化：SMMUv3、DMA隔离与设备直通}\label{sec:hardware-dev}
 
@@ -386,7 +386,7 @@ CPU 已被 Stage-2 约束，仍需要 SMMU 的原因在于 DMA 这条绕过 CPU 
 
 两级翻译与 CPU 侧语义对应：设备侧 Stage-1 把设备地址（即 guest 眼中的 IOVA 或设备地址）翻成 IPA，可由 guest 操作系统管理；Stage-2 把 IPA 翻成 PA，由 hypervisor 管理。当启用 Stage-1 时，STE 的 \code{S1ContextPtr} 再指向一组 Context Descriptor（CD），请求携带的 SubstreamID（在 PCIe 中即 PASID）进一步选择不同 CD，从而为同一设备的不同进程上下文提供不同 Stage-1 翻译；CD 里的 \code{TTB0}/\code{TTB1} 是 Stage-1 页表基址，\code{ASID} 区分地址空间，\code{MAIR} 提供内存属性。SubstreamID 只影响 Stage-1 的选择，不影响仅由 StreamID 决定的 Stage-2\cite{source10}。配置表与命令队列由软件建立或提交，SMMU 读取并执行；事件队列和 PRI 队列则承载硬件向软件报告的信息。不同队列的生产者、消费者方向不同，不能一概说成软件写、硬件读。
 
-把这条 stage-2 路径落到代码，需要两份数据结构与两段路径。数据结构一侧，KVM/驱动只关心 STE 里与 stage-2 相关的字段——代码块~\ref{lst:smmu-struct} 按 \code{arm_smmu_make_s2_domain_ste} 的实际写入整理出这份"stage-2 only"的 STE 视图：\code{Config=S2_TRANS} 表示这条流只做 stage-2 翻译，\code{S2VMID} 标识所属虚拟机，\code{VTCR} 给出页表粒度与起始级，\code{S2TTB} 给出 stage-2 页表基址；这正是图~\ref{fig:smmu-ste} 里 STE 的 \code{S2TTB}/\code{VMID} 那一路，\code{S1ContextPtr} 在这条配置下不使用。
+把这条 stage-2 路径落到代码，需要两份数据结构与两段路径。数据结构一侧，KVM/驱动只关心 STE 里与 stage-2 相关的字段——代码块~\ref{lst:smmu-struct} 按 \code{arm_smmu_make_s2_domain_ste} 的实际写入整理出这份“stage-2 only”的 STE 视图：\code{Config=S2_TRANS} 表示这条流只做 stage-2 翻译，\code{S2VMID} 标识所属虚拟机，\code{VTCR} 给出页表粒度与起始级，\code{S2TTB} 给出 stage-2 页表基址；这正是图~\ref{fig:smmu-ste} 里 STE 的 \code{S2TTB}/\code{VMID} 那一路，\code{S1ContextPtr} 在这条配置下不使用。
 
 \begin{lstlisting}[caption={stage-2 only 的 STE 与 domain：SMMUv3 驱动里与 IPA→PA 相关的字段（arm-smmu-v3.h / arm-smmu-v3.c，整理）},label={lst:smmu-struct}]
 /* arm_smmu_ste：64 字节的原始表项，这里只列 stage-2 相关字段 */
@@ -410,7 +410,7 @@ struct arm_smmu_domain {        /* 一个直通设备组共享的翻译域 */
 };
 \end{lstlisting}
 
-路径分"建映射"与"运行时查表"两段，见代码块~\ref{lst:smmu-path}。建映射发生在 VFIO 把 guest 的内存锁进设备 DMA 域时：\code{vfio_iommu_map} 对每个内存段调 \code{iommu_map}，驱动先按设备 StreamID 把 STE 写成 stage-2 形态，再经 \code{arm_smmu_map_pages} 往 stage-2 页表里填 IPA→PA 的表项。运行时则完全是硬件动作：设备发出 DMA，SMMU 用 StreamID 取 STE、按 \code{S2TTB} 走页表，把设备地址（guest IPA）翻成 host PA 后放到互联上——全程没有 CPU、没有 KVM 参与。
+路径分“建映射”与“运行时查表”两段，见代码块~\ref{lst:smmu-path}。建映射发生在 VFIO 把 guest 的内存锁进设备 DMA 域时：\code{vfio_iommu_map} 对每个内存段调 \code{iommu_map}，驱动先按设备 StreamID 把 STE 写成 stage-2 形态，再经 \code{arm_smmu_map_pages} 往 stage-2 页表里填 IPA→PA 的表项。运行时则完全是硬件动作：设备发出 DMA，SMMU 用 StreamID 取 STE、按 \code{S2TTB} 走页表，把设备地址（guest IPA）翻成 host PA 后放到互联上——全程没有 CPU、没有 KVM 参与。
 
 \begin{lstlisting}[caption={SMMUv3 stage-2 的两段路径：建映射（软件）与运行时 DMA 查表（硬件）（依据 vfio\_iommu\_type1.c / arm-smmu-v3.c 整理的示意）},label={lst:smmu-path},style=pseudopy]
 # ── 建映射：VFIO 把 guest 内存锁进设备 DMA 域（控制面，软件）──
@@ -437,12 +437,12 @@ def smmu_translate_dma(streamid, device_addr):
     return pa                            # 翻译后的地址放回互联
 \end{lstlisting}
 
-举一个具体的直通网卡例子。假设 guest 的内存布局里 \code{IPA 0x4000\_0000} 起的一段被 VFIO 锁进网卡的 DMA 域，对应 host 物理页 \code{PA 0x1\_2000\_0000}，网卡的 \code{StreamID=0x10}。建映射时，驱动把 \code{stream\_table[0x10]} 写成 \code{config=S2\_TRANS}、\code{s2vmid=7}、\code{s2ttb=<该域 stage-2 页表基址>}，并填一条表项 \code{IPA 0x4000\_0000 → PA 0x1\_2000\_0000}。运行时 guest 驱动往描述符里填"报文缓冲区在 \code{0x4000\_1000}"（这是 guest 的 IPA），网卡发起 DMA 读，SMMU 用 \code{StreamID=0x10} 取到那条 STE，沿 \code{s2ttb} 走出 \code{PA 0x1\_2000\_1000}，把翻译后的地址放到互联上完成传输。若 guest 恶意把描述符改成域外的 \code{IPA 0x8000\_0000}（未建映射），SMMU 查表失败、产生 translation fault 而不是访问那块内存——这正是 stage-2 在 DMA 侧兑现"resource control"的方式，与 CPU 侧 stage-2 缺页由 \code{kvm\_handle\_guest\_abort} 接管相对应。
+举一个具体的直通网卡例子。假设 guest 的内存布局里 \code{IPA 0x4000\_0000} 起的一段被 VFIO 锁进网卡的 DMA 域，对应 host 物理页 \code{PA 0x1\_2000\_0000}，网卡的 \code{StreamID=0x10}。建映射时，驱动把 \code{stream\_table[0x10]} 写成 \code{config=S2\_TRANS}、\code{s2vmid=7}、\code{s2ttb=<该域 stage-2 页表基址>}，并填一条表项 \code{IPA 0x4000\_0000 → PA 0x1\_2000\_0000}。运行时 guest 驱动往描述符里填“报文缓冲区在 \code{0x4000\_1000}”（这是 guest 的 IPA），网卡发起 DMA 读，SMMU 用 \code{StreamID=0x10} 取到那条 STE，沿 \code{s2ttb} 走出 \code{PA 0x1\_2000\_1000}，把翻译后的地址放到互联上完成传输。若 guest 恶意把描述符改成域外的 \code{IPA 0x8000\_0000}（未建映射），SMMU 查表失败、产生 translation fault 而不是访问那块内存——这正是 stage-2 在 DMA 侧兑现“resource control”的方式，与 CPU 侧 stage-2 缺页由 \code{kvm\_handle\_guest\_abort} 接管相对应。
 
 
 这一结构给出若干层次的取舍，不能想当然地全盘启用。最简的直通只需 Stage-2：hypervisor 在 STE 里配置 S2 页表，把设备使用的 guest IPA 翻译成 host PA，guest 完全不必感知 SMMU 的存在，也就谈不上 vIOMMU。仅 Stage-2 是架构许可的一条路径，但它不等同于 Linux 普通直通域的实际默认——本机 SMMUv3 驱动为普通域分配 paging domain 时，在硬件支持 Stage-1 的情况下会优先选用宿主管理的 S1\footnote{Linux: \path{drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c}，\codeplain{arm_smmu_domain_alloc_paging_flags()} 中的 S1/S2 选择。}，因而物理 SMMU 使用 S1，并不说明该 S1 是 guest 管理的，也不说明 guest 一定看见了 vIOMMU。guest 自管 I/O Stage-1 是可选项：只有当 guest 需要自己的 IOMMU 语义（例如在 guest 内部再隔离各驱动或做嵌套）时，才把 Stage-1 的 CD 与页表交给 guest 以 IPA 编址，由 hypervisor 的 Stage-2 继续把 IPA 翻成 PA，形成 S1+S2 的两级组合\cite{source10}。
 
-真正的设备直通是一项系统工程，SMMU 只是其中一环。把一块物理设备整个交给 guest，还须解决设备分配与控制接口、VFIO/IOMMU 的 DMA 映射、该设备中断在 GIC 中的路由（把物理中断映射到目标 vCPU）、以及设备复位与可迁移性等一组协作问题；SMMU 既不是设备模型，也不会替代 virtio 或实现网卡/磁盘的功能——它只解决"设备访存不越界"这一件事。反过来，软件设备的 guest 内存访问由宿主 CPU 通过后备内存映射完成，不要求经过物理 SMMU，也不一定每次都执行一次拷贝；后端若进一步使用真实设备，其硬件 DMA 仍由宿主的 IOMMU/DMA 管理机制约束\cite{source5,source10}。
+真正的设备直通是一项系统工程，SMMU 只是其中一环。把一块物理设备整个交给 guest，还须解决设备分配与控制接口、VFIO/IOMMU 的 DMA 映射、该设备中断在 GIC 中的路由（把物理中断映射到目标 vCPU）、以及设备复位与可迁移性等一组协作问题；SMMU 既不是设备模型，也不会替代 virtio 或实现网卡/磁盘的功能——它只解决“设备访存不越界”这一件事。反过来，软件设备的 guest 内存访问由宿主 CPU 通过后备内存映射完成，不要求经过物理 SMMU，也不一定每次都执行一次拷贝；后端若进一步使用真实设备，其硬件 DMA 仍由宿主的 IOMMU/DMA 管理机制约束\cite{source5,source10}。
 
 \subsection{协作小结：硬件负责机制，软件负责管理与组合}\label{sec:hardware-sum}
 

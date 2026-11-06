@@ -24,7 +24,7 @@ python scripts/verify_latex.py
 - `chapters/04-hyperturtle.tex`：性能问题重新定位、HyperTurtle 通用机制与两个案例、实验评议、局限与开放问题。
 - 两个嵌套章节由同一次写作任务（`prompts/03-nested.md`）产出后拆分，`logs/03-nested-usage.json` 记录那次调用。
 - `chapters/frontmatter.tex` / `conclusion.tex`：摘要、关键词与结语。
-- `figures/`：可直接编辑的 TikZ 机制图。
+- `figures/`：可直接编辑的 TikZ 机制图与规范/论文原图（`.png`）两类；原图在 caption 中注明出处。
 - `references.bib`：原论文、架构手册及源码资料。
 - `editorial/`：写作简报、原始证据摘录、资料定位与审校说明（不进入论文）。
 - `prompts/` / `logs/`：DeepSeek 写作任务与实际模型用量/完成记录（不进入论文）。

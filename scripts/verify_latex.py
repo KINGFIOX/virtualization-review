@@ -60,7 +60,7 @@ for name in ['00-intro','01-software','02-hardware','03-turtles','04-hyperturtle
 for token in ['TODO','TBD','待补图','待补正文','待核验','此处省略']:
     if token in body: errors.append('Unresolved placeholder: '+token)
 figures = re.findall(r'\\label\{(fig:[^}]+)\}',body)
-if len(figures)!=4: errors.append('Expected 4 figures, got '+str(len(figures)))
+if len(figures)!=5: errors.append('Expected 5 figures, got '+str(len(figures)))
 if not (ROOT/'build/main.pdf').exists(): errors.append('No compiled PDF')
 
 # Bound-check actual PDF text. The header/footer are legitimate page content.

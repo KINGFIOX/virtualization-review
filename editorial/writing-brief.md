@@ -68,7 +68,8 @@
 - `figures/software-interrupt.tex`，label fig:softirq：设备→PLIC→pending/kick→CPU异常。
 - `figures/arm-platform.tex`，label fig:arm：CPU两阶段访存、设备SMMU、GIC中断三路分工。
 - `figures/gic-delivery.tex`，label fig:gic：GICv3注入与GICv4驻留/doorbell分支。
-- `figures/nested-mapping.tex`，label fig:nested：VMCS01/12/02与EPT逻辑/实际映射。
+- `figures/turtles-architecture.png`，label fig:turtles-arch：嵌套总体架构（原论文 Figure 3，L0/L1/L2 与 0-1、0-2、1-2 三份状态）。
+- `figures/turtles-mmu-models.png`，label fig:turtles-mmu：三种嵌套 MMU 模型（原论文 Figure 4），正文只展开第 3 栏 EPT-on-EPT。
 - `figures/hyperupcall.tex`，label fig:hyperupcall：普通事件L2→L0→L1→L0→L2与HT就地处理。
 
 表格用tabularx或固定列宽，整表不超过\linewidth。不用复杂TikZ，你只需\input上述已分配的图文件。

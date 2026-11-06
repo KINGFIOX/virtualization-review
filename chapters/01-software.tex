@@ -40,7 +40,7 @@ def tb_gen_code(pc, cpu):
     return backend_emit(ir)   # 优化 → 寄存器分配 → 发射宿主机器码
 \end{lstlisting}
 
-代码块~\ref{lst:tcg-loop} 把上述过程分成译时与运行时两侧：译时是"RISC-V 解码→TCG IR→优化与寄存器分配→x86-64 发射"的流水线，产物放入 TB 缓存；运行时则以 PC 与 CPU 状态查缓存，命中直接执行、未命中回译时，两条路径由块链接与调度循环衔接。需要强调的是，示意中的宿主代码代表语义等价实现，而不是固定的逐指令替换模板。
+代码块~\ref{lst:tcg-loop} 把上述过程分成译时与运行时两侧：译时是“RISC-V 解码→TCG IR→优化与寄存器分配→x86-64 发射”的流水线，产物放入 TB 缓存；运行时则以 PC 与 CPU 状态查缓存，命中直接执行、未命中回译时，两条路径由块链接与调度循环衔接。需要强调的是，示意中的宿主代码代表语义等价实现，而不是固定的逐指令替换模板。
 
 \subsubsection{guest 状态：从硬件寄存器到 C 结构体}\label{sec:software-cpu-state}
 
@@ -93,7 +93,7 @@ target_ulong HELPER(csrrw)(CPURISCVState *env, int csr,
 }
 \end{lstlisting}
 
-翻译时函数体的两处注释在正文展开。\code{translator_io_start}（\path{accel/tcg/translator.c}）标记"有副作用的地方开始了"：把 \code{db->is_jmp} 从 \code{DISAS_NEXT} 改成 \code{DISAS_TOO_MANY}，保证这条指令是当前 TB 的最后一条——副作用（helper 可能抛异常）会推翻跨点的翻译假设，切断最安全，也保证后续 \code{gen_update_pc} 把 PC 写到正确的值。\code{gen_helper_csrrw} 是核心行：往 IR 流"追加"一条 call op——注意是追加，不是现在调用；后端编译这段 IR 时，它才变成按宿主 ABI 摆好参数、call 进 \code{helper_csrrw} 的机器码；\code{tcg_env} 就是 env 指针（guest CPU 状态）。
+翻译时函数体的两处注释在正文展开。\code{translator_io_start}（\path{accel/tcg/translator.c}）标记“有副作用的地方开始了”：把 \code{db->is_jmp} 从 \code{DISAS_NEXT} 改成 \code{DISAS_TOO_MANY}，保证这条指令是当前 TB 的最后一条——副作用（helper 可能抛异常）会推翻跨点的翻译假设，切断最安全，也保证后续 \code{gen_update_pc} 把 PC 写到正确的值。\code{gen_helper_csrrw} 是核心行：往 IR 流“追加”一条 call op——注意是追加，不是现在调用；后端编译这段 IR 时，它才变成按宿主 ABI 摆好参数、call 进 \code{helper_csrrw} 的机器码；\code{tcg_env} 就是 env 指针（guest CPU 状态）。
 
 \code{do_csr_post} 的收尾做三件事：
 
@@ -231,11 +231,11 @@ OUT: （TB 2 节选）
 代码块~\ref{lst:rv-backend-tb2} 中段 \code{add a0,t2,t4} 展示了寄存器分配的两个基本事实：
 
 \begin{enumerate}[label=\arabic*.,leftmargin=2.5em,itemsep=2pt]
-\item \textbf{寄存器分配的作用域是单个 TB}：t2 在上一 TB 里算得的值此刻只睡在 \code{env->gpr[7]} 槽里，后端为这条加法把它装入 \asm{\%r12}（callee-saved）、算完把 a0 写回 \code{env->gpr[10]} 槽（\asm{0x50(\%rbp)}）——装入与写回都在块边界发生，任何宿主寄存器都不携带跨 TB 的状态；每个 TB 必须可独立查找、链接、失效甚至整体冲刷，跨块状态住在寄存器里会让"删掉一个 TB"推翻所有 TB 的假设。这与编译器的函数级分配本质不同：没有跨块 live range、没有图着色，一个 temp 的宿主寄存器只在它所属的 TB 内有效。
+\item \textbf{寄存器分配的作用域是单个 TB}：t2 在上一 TB 里算得的值此刻只睡在 \code{env->gpr[7]} 槽里，后端为这条加法把它装入 \asm{\%r12}（callee-saved）、算完把 a0 写回 \code{env->gpr[10]} 槽（\asm{0x50(\%rbp)}）——装入与写回都在块边界发生，任何宿主寄存器都不携带跨 TB 的状态；每个 TB 必须可独立查找、链接、失效甚至整体冲刷，跨块状态住在寄存器里会让“删掉一个 TB”推翻所有 TB 的假设。这与编译器的函数级分配本质不同：没有跨块 live range、没有图着色，一个 temp 的宿主寄存器只在它所属的 TB 内有效。
 \item \textbf{call 处要同时满足两套约束}：helper 是宿主 ABI 的 C 函数，参数必须按 SysV 摆进规定的寄存器（代码块~\ref{lst:rv-backend-tb1} 里 \code{esi} 装 CSR 号、\code{rdi} 装 env），与此同时后端自己的分配器必须让路——QEMU 的 \code{tcg_reg_alloc_call}（\path{tcg/tcg.c}）在发射 call 前先把参数 temp 搬进 ABI 寄存器，再释放全部 caller-saved 寄存器（helper 有权破坏它们），并同步 guest 寄存器状态（\code{save_globals}，csrr 这种会写 guest 寄存器的 helper 调用前必须把已装入宿主寄存器的全局 temp 写回 env）。分配顺序与这两套约束是咬合的：\code{tcg_target_reg_alloc_order}（\path{tcg/x86_64/tcg-target.c.inc}）把 callee-saved 的 rbp/rbx/r12–r15 排在最前，guest temp 优先分到它们——跨 helper 调用不用重装；只有 callee-saved 分配完了，才会分配 caller-saved ，留给 call 的参数与 helper 可破坏的暂存。用一个小循环可以直观验证：\code{rdcycle} 嵌在 \code{bnez} 循环里时，循环变量 t1 分到 \asm{\%rbx}（callee-saved），helper 调用前后无需保存；而每条 \code{addi t1,t1,-1} 的宿主形态是 \asm{mov 0x30(\%rbp),\%rbx; dec \%rbx; mov \%rbx,0x30(\%rbp)}——装入、运算、写回，值不留在寄存器里跨出这个 TB（本机 \code{qemu-riscv64 -d out_asm} 实测）。
 \end{enumerate}
 
-这自然引出一个问题：既然任何宿主寄存器都不携带跨 TB 状态，退出 TB 时"还活着的"值怎么办？答案是 liveness 分析保证它们在离开前已经被写回 env——不是靠 TB 末尾一条显式的保存指令，而是在翻译时就安排好的同步点。机制在 \path{tcg/tcg.c} 的 liveness pass 里：\code{la_bb_end} 把 TB 末尾每个 temp 的状态置为 \code{TS_DEAD | TS_MEM}，发射阶段 \code{temp_sync} 据此对仍被占用的宿主寄存器生成一条写回 env 的 store。上面那个 \code{rdcycle} 嵌 \code{bnez} 循环的小程序，实测形态正是如此：循环体 \code{addi t1,t1,-1} 的宿主代码是 \asm{mov 0x30(\%rbp),\%rbx; dec \%rbx; mov \%rbx,0x30(\%rbp)}——算完立刻写回，\asm{\%rbx} 里不残留任何值跨出 TB。这个"最后使用者负责写回"的设计与分配只在 TB 内生效是同一枚硬币的两面：正因为 TB 可以整体失效、冲刷，块与块之间的契约就只能是 env 内存，寄存器里的值过了块边界一律作废。
+这自然引出一个问题：既然任何宿主寄存器都不携带跨 TB 状态，退出 TB 时“还活着的”值怎么办？答案是 liveness 分析保证它们在离开前已经被写回 env——不是靠 TB 末尾一条显式的保存指令，而是在翻译时就安排好的同步点。机制在 \path{tcg/tcg.c} 的 liveness pass 里：\code{la_bb_end} 把 TB 末尾每个 temp 的状态置为 \code{TS_DEAD | TS_MEM}，发射阶段 \code{temp_sync} 据此对仍被占用的宿主寄存器生成一条写回 env 的 store。上面那个 \code{rdcycle} 嵌 \code{bnez} 循环的小程序，实测形态正是如此：循环体 \code{addi t1,t1,-1} 的宿主代码是 \asm{mov 0x30(\%rbp),\%rbx; dec \%rbx; mov \%rbx,0x30(\%rbp)}——算完立刻写回，\asm{\%rbx} 里不残留任何值跨出 TB。这个“最后使用者负责写回”的设计与分配只在 TB 内生效是同一枚硬币的两面：正因为 TB 可以整体失效、冲刷，块与块之间的契约就只能是 env 内存，寄存器里的值过了块边界一律作废。
 
 \subsubsection{TB 缓存与 guest 异常}\label{sec:software-cpu-tb}
 
@@ -337,7 +337,7 @@ def do_mmio_read(env, mr, offset, size):
 
 三类中前两类是 QEMU 内部的实现路径（一个走宿主内存、一个走设备模型），guest 都感知不到区别；只有第三类是模拟出来的架构语义。容易混淆的是软件 TLB 未命中与 guest 页错误：前者只是缓存里没有这一页，补表回填后继续执行，属性能事件，与 guest 是否越权无关。
 
-翻译结果之上是物理地址空间的建模。QEMU 用无环的 \codeplain{MemoryRegion} 图与 \codeplain{AddressSpace} 对象描述整台机器的地址布局：RAM 区域有宿主内存后备，读写直达宿主缓冲区；MMIO 区域没有宿主内存，每次访问都会转交对应设备模型处理；此外还有 ROM、ROM 设备、别名与容器等类型，用于表达只读固件、可动态改写的窗口等语义\footnote{QEMU: \path{docs/devel/memory.rst}。}。RAM 与 MMIO 在 TLB 填充阶段就被区分：前者缓存了"guest 地址到宿主内存的偏移"，后者设置 MMIO 等慢路径标志，并不提供可直接读写的 RAM 后备地址，使访存转向设备回调\cite{source3}。这种分流既决定了性能（RAM 快、MMIO 慢），也把内存虚拟化自然接到设备虚拟化上。
+翻译结果之上是物理地址空间的建模。QEMU 用无环的 \codeplain{MemoryRegion} 图与 \codeplain{AddressSpace} 对象描述整台机器的地址布局：RAM 区域有宿主内存后备，读写直达宿主缓冲区；MMIO 区域没有宿主内存，每次访问都会转交对应设备模型处理；此外还有 ROM、ROM 设备、别名与容器等类型，用于表达只读固件、可动态改写的窗口等语义\footnote{QEMU: \path{docs/devel/memory.rst}。}。RAM 与 MMIO 在 TLB 填充阶段就被区分：前者缓存了“guest 地址到宿主内存的偏移”，后者设置 MMIO 等慢路径标志，并不提供可直接读写的 RAM 后备地址，使访存转向设备回调\cite{source3}。这种分流既决定了性能（RAM 快、MMIO 慢），也把内存虚拟化自然接到设备虚拟化上。
 
 两类缓存解决的是两类不同的失效问题：
 
@@ -450,7 +450,7 @@ def serial_mm_read(opaque, addr, size):
     return serial_io_ops.read(&s.serial, addr >> s.regshift, 1)
 \end{lstlisting}
 
-关键在于：MMIO 分发把一次 guest 设备寄存器写转换为对设备状态机的调用，而不是先对某个真实 MMIO 地址做宿主写操作。guest 看到的只是一个"存在寄存器"的串口，后端连的是字符设备、管道还是文件，完全由 QEMU 配置决定。
+关键在于：MMIO 分发把一次 guest 设备寄存器写转换为对设备状态机的调用，而不是先对某个真实 MMIO 地址做宿主写操作。guest 看到的只是一个“存在寄存器”的串口，后端连的是字符设备、管道还是文件，完全由 QEMU 配置决定。
 
 数据路径则以 virtio-blk 展开，代码块~\ref{lst:virtio-blk} 给出从 virtqueue 到完成通知的全流程。
 
@@ -489,14 +489,14 @@ def virtio_blk_req_complete(req, status):
     virtio_notify(vdev, req.vq)  # 需要时拉起中断 -> PLIC -> 架构投递
 \end{lstlisting}
 
-这里的数据搬运是软件 DMA：设备通过自己的 \code{AddressSpace} 访问 guest 内存，直接使用 guest 物理地址到宿主缓冲区的映射，并不自动套用某个 guest 进程的 CPU 页表；只有配置了 vIOMMU 时，设备地址才会额外经过一次设备地址转换。区分"软件 DMA 走设备地址空间"与"CPU 访存走 CPU 页表"是理解设备与内存两层如何分工的要点。完成通知则回接上一节：\code{virtio_notify} 在需要时拉起中断，走 PLIC 与架构投递回到 guest。
+这里的数据搬运是软件 DMA：设备通过自己的 \code{AddressSpace} 访问 guest 内存，直接使用 guest 物理地址到宿主缓冲区的映射，并不自动套用某个 guest 进程的 CPU 页表；只有配置了 vIOMMU 时，设备地址才会额外经过一次设备地址转换。区分“软件 DMA 走设备地址空间”与“CPU 访存走 CPU 页表”是理解设备与内存两层如何分工的要点。完成通知则回接上一节：\code{virtio_notify} 在需要时拉起中断，走 PLIC 与架构投递回到 guest。
 
-最后要区分两种设备接口。模拟现有硬件接口（如 NS16550、PCI 设备）与 virtio 这类半虚拟化设备接口，都能由 QEMU 的软件后端提供服务，差别只在 guest 侧协议与性能；virtio 不是 CPU 硬件虚拟化指令，也不要求 CPU 必须用 KVM 执行，它只是约定了一套更利于软件实现高效 I/O 的接口。具体到 virtio-blk，virtqueue 组织请求与完成信息。以 split virtqueue 为例，guest 写好描述符链、更新 avail 环并按通知规则发出 kick，设备侧读描述符、执行后端、把结果写回 guest 内存、再写 used 环并按协商的通知规则决定是否产生中断，二者通过共享内存环而非真实总线握手来传递请求与完成状态。两者在"由谁实现设备、guest 如何发现与驱动"上不同，在"都是软件模型"这一点上相同。
+最后要区分两种设备接口。模拟现有硬件接口（如 NS16550、PCI 设备）与 virtio 这类半虚拟化设备接口，都能由 QEMU 的软件后端提供服务，差别只在 guest 侧协议与性能；virtio 不是 CPU 硬件虚拟化指令，也不要求 CPU 必须用 KVM 执行，它只是约定了一套更利于软件实现高效 I/O 的接口。具体到 virtio-blk，virtqueue 组织请求与完成信息。以 split virtqueue 为例，guest 写好描述符链、更新 avail 环并按通知规则发出 kick，设备侧读描述符、执行后端、把结果写回 guest 内存、再写 used 环并按协商的通知规则决定是否产生中断，二者通过共享内存环而非真实总线握手来传递请求与完成状态。两者在“由谁实现设备、guest 如何发现与驱动”上不同，在“都是软件模型”这一点上相同。
 
 \subsection{能力与成本}\label{sec:software-cost}
 
-把四个维度并置，才能看出软件方案"能做什么"与"为什么慢"是同一件事的两面。翻译代码让 guest 计算得以进行，软件地址转换让 guest 访存保持页表语义，事件状态机让异步中断成立，设备模型让 I/O 可用，四者组合起来才足以运行一套完整的 guest 操作系统；缺任何一环，其余环都没有意义。这是软件虚拟化的完整能力边界：它不依赖宿主硬件的任何虚拟化特性，因而可移植性极强——增加目标平台主要涉及相应 CPU/设备模型和宿主执行后端，而不必为每个 guest-host 组合重写整套实现\cite{source2,source3}。
+把四个维度并置，才能看出软件方案“能做什么”与“为什么慢”是同一件事的两面。翻译代码让 guest 计算得以进行，软件地址转换让 guest 访存保持页表语义，事件状态机让异步中断成立，设备模型让 I/O 可用，四者组合起来才足以运行一套完整的 guest 操作系统；缺任何一环，其余环都没有意义。这是软件虚拟化的完整能力边界：它不依赖宿主硬件的任何虚拟化特性，因而可移植性极强——增加目标平台主要涉及相应 CPU/设备模型和宿主执行后端，而不必为每个 guest-host 组合重写整套实现\cite{source2,source3}。
 
-成本则须逐项拆解，而不是笼统写"慢若干倍"。翻译与缓存维护的代价集中在冷路径（首次翻译）与失效路径（映射或代码变化），热路径只付出块链接的跳转与状态检查；访存代价来自每个访存前的软件 TLB 检查，以及 miss 时重走 guest 页表的开销；helper 调用打断了宿主代码的寄存器分配局部性，并在 C 代码与生成代码之间切换上下文；中断与设备 I/O 还引入 vCPU 线程与事件线程之间的同步，以及后端真实 I/O 的等待。这些成本落在不同频率与不同路径上：一个纯计算密集的 guest 主要承受翻译与寄存器分配的摊还成本，一个 I/O 密集的 guest 则主要承受 MMIO 回调、中断往返与后端等待，脱离具体工作负载无法给出统一的性能倍数——本综述亦不采信任何未指明配置与基线的性能数字。
+成本则须逐项拆解，而不是笼统写“慢若干倍”。翻译与缓存维护的代价集中在冷路径（首次翻译）与失效路径（映射或代码变化），热路径只付出块链接的跳转与状态检查；访存代价来自每个访存前的软件 TLB 检查，以及 miss 时重走 guest 页表的开销；helper 调用打断了宿主代码的寄存器分配局部性，并在 C 代码与生成代码之间切换上下文；中断与设备 I/O 还引入 vCPU 线程与事件线程之间的同步，以及后端真实 I/O 的等待。这些成本落在不同频率与不同路径上：一个纯计算密集的 guest 主要承受翻译与寄存器分配的摊还成本，一个 I/O 密集的 guest 则主要承受 MMIO 回调、中断往返与后端等待，脱离具体工作负载无法给出统一的性能倍数——本综述亦不采信任何未指明配置与基线的性能数字。
 
-这套方案的边界也就此划清：它以软件实现架构语义，并在翻译执行、地址转换与中断投递中承担额外管理工作；功能等价依赖各模型及其组合的正确性，而不能仅由“纯软件”这一实现方式保证。下一章考察的硬件辅助，正是把这些高频路径上的软件介入下放到处理器与系统结构，但设备功能与管理策略仍需软件完成，硬件并不会自动补上软件方案中"模型"那一半。
+这套方案的边界也就此划清：它以软件实现架构语义，并在翻译执行、地址转换与中断投递中承担额外管理工作；功能等价依赖各模型及其组合的正确性，而不能仅由“纯软件”这一实现方式保证。下一章考察的硬件辅助，正是把这些高频路径上的软件介入下放到处理器与系统结构，但设备功能与管理策略仍需软件完成，硬件并不会自动补上软件方案中“模型”那一半。
