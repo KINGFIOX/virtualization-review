@@ -1,79 +1,164 @@
 \section{嵌套虚拟化（二）：HyperTurtle 与跨层往返的削减}\label{sec:hyperturtle}
 
+计算机领域有一句话：一件事如果复杂到不好直接描述，就不妨在中间加一层抽象。虚拟化本身就是这句话的产物——VMM 把整台机器的指令集、地址空间、中断与设备重新表述成一组虚拟接口，于是“在一台机器上跑多台机器”不再需要逐条处理每个细节，而变成对这套接口的一次实现。嵌套虚拟化是把同一层抽象再叠一次：L1 拿到的不是真实机器，而是一套虚拟的虚拟化接口，它用这套接口去管理 L2。
 
-上一章的结论是：Turtles 在缺少架构支持的条件下把嵌套做对了，代价落在跨层往返上。HyperTurtle（USENIX ATC 2025）接着这个问题往下走：在不放弃 L1 对 L2 控制权的前提下，把一部分本应进入 L1 的处理逻辑留在 L0 就地执行。讨论范围仍落在 CPU、内存、中断、设备四个维度之内，但不再逐维复述机制：本章按“省掉哪一次往返、共享什么状态、什么时候回退”来组织，最后按论文报告的实验证据评议其收益与外推边界。
+抽象层不是免费的。每穿过一次接口边界都要付出模式切换、状态翻译与事件转发的代价，叠了两层，这条路径就要走两遍。跨抽象层的性能优化由此成为一个独立的问题：目标不是取消抽象——那会连带丢掉隔离与管理权——而是让一部分操作不必真的穿过它，在保持接口语义的前提下把执行留在更靠底的那一层。HyperTurtle 正落在这个位置上：L1 hypervisor 通过 eBPF 把自身的处理逻辑注册成 L0 事件处理路径上的 hook，L2 触发相应事件时由 L0 就地调用这段程序完成处理，省掉进入 L1 的那次往返，而策略仍由 L1 定义~\cite{source8}。
 
-\subsection{性能问题的重新定位}\label{sec:ht-motiv}
+上一章已经用普通嵌套的九步路径说明：当 $EPT_{0\to2}$ 与 $EPT_{1\to2}$ 都缺项时，L0 要先进入 L1 补蓝本，再让 L2 重执行、再次退出，最后才能补硬件实际使用的影子表。本章不再并列展开网络、采样和 artifact 程序，而是只沿这一次 $EPT_{0\to2}$ page fault 往下走：先分清两张 EPT 各自缺什么，再看 hyperupcall 如何借助 L1 中 QEMU 的页表和预分配帧池补 $EPT_{1\to2}$，最后分析 L0 如何收尾、L1 如何同步，以及何时必须回退。
 
-上一章末的代价分析只给出了“退出被逐级放大”这一结论；HyperTurtle 的动机分析把它测得更系统，给出两条明确的量化结论。其一，从 VM-exit 到下一次 VM-entry 的处理时长因退出原因而异，其中包含切换和软件处理，不能将整个数值视为纯硬件切换延迟：L0 处理一次 nop hypercall 从 L1 退出约 0.85$\mu$s，从 L2 退出则约 2.82$\mu$s；NMI 的差距更大，从 L1 是 5.7$\mu$s，从 L2 是 16.7$\mu$s~\cite{source8}。其二，L2 触发的退出普遍比 L1 更贵，因为 L0 需要把退出注入给 L1、并维护合成控制结构及其他管理状态；论文援引 Vilanova 等人的结果指出，world-switch 相关开销约占一次 10$\mu$s 的 \code{cpuid} 模拟的 33\%~\cite{source8}。这两个结论共同指向：跨层往返及其处理是这些负载的重要成本来源，不能只按地址翻译层数解释嵌套开销。
+图~\ref{fig:ht-worldswitch} 给出这一改法的总览：左栏普通嵌套把 L2 的事件经 L0 转发给 L1 hypervisor，右栏则由 L0 在处理路径上直接执行 hyperupcall。它强调的是处理位置的变化；本章随后补全图中略去的两张 EPT、QEMU 页表与回退条件。
 
-于是出现一个张力。想绕过 L1 的优化确实存在——DVH（Direct Virtual Hardware）把 L0 的虚拟设备直接分配给 L2，从 L2 的数据路径上拿掉 L1，延迟与吞吐都明显改善。但代价是 L1 对 L2 失去了控制：L1 不再处于 L2 的网络控制路径上，无法再施加路由、监控、限速等策略，而这些正是容器管理所必需的~\cite{source8}。“路径更短”与“管理权仍在租户”由此对立起来。HyperTurtle 试图回答的过渡问题因此不是“怎样把 L1 整个搬进 L0”，而是：能否让一部分由 L1 定义的处理逻辑在 L0 就地执行，既省掉往返、又保留 L1 的策略控制，同时不破坏 L0 的资源边界与隔离。
-
-\subsection{HyperTurtle：把L1的部分处理逻辑下放到L0}\label{sec:hyperturtle-design}
-
-HyperTurtle 的答案是把 L1 hypervisor的一部分功能以 eBPF 程序的形式下放到 L0，称之为 hyperupcall：L1 把自己对某类 L2 事件的处理逻辑写成一个 eBPF 程序，交给 L0 在 L2 事件的处理路径上就地调用，从而在“L1 仍然定义逻辑、L0 负责执行与兜底”的前提下省去进入 L1 的往返。其设计目标有四条：消除多余 world-switch（性能）、保留 L1 对 L2 的策略控制（控制）、最小化对 L0 的改动（低侵入）、提供可推广到不同子系统的通用机制（通用）~\cite{source8}。实现面向 KVM，且限定为单层嵌套。
-
-\subsubsection{通用机制：注册、共享状态、执行与回退}\label{sec:nested-ht-infra}
-
-注册路径与执行热路径是两回事，必须分开看。安装由 L1 通过 hypercall 发起，经 L0 的 KVM 与 QEMU 等用户态组件落地：L1 提供编译好的 eBPF 程序与要挂接的 hook，L0 借 Linux 内核已有的 eBPF 注册机制完成验证、加载与链接；与更早的 hyperupcall 原型不同，HyperTurtle 把“加载”与“链接”拆成两个 hypercall，使同一个 hyperupcall 能挂到多个 hook 而无需重复加载~\cite{source8}。安装完成后，事件热路径可调用已链接的 eBPF：例如 L2 退出到 L0 后，就地完成可下放的处理，再恢复 L2；网络 hook 则位于相应的数据处理路径。图~\ref{fig:hyperupcall} 对比的是普通处理与下放后的事件路径，安装动作不在图示热路径之内。
-
-下放逻辑要在 L0 里正确运行，需要两类共享状态。一是数据通道：L0 与 L1 之间通过共享的 eBPF map 交换数据，而不是早先 hyperupcall 的基于数据包的方式，以支持并发访问；具体做法是新增一个 hypercall 创建一个共享内存 PCI 设备，把数组型 eBPF map 暴露给 L1。二是受限的内存访问：新增 helper \code{bpf_probe_read_hyperupcall} 让 eBPF 能读 L1 的物理内存，该 helper 会校验地址有效且确属发起该程序的 L1，从而把“每个 hyperupcall 只能读自己所属 L1 的内存”这一隔离写成强制约束~\cite{source8}。
-
-程序验证只是信任边界的一部分，访问授权与状态同步同样需要单独设计。HyperTurtle 支持两种安全模型：一是 L1 提交的程序由 L0 的 eBPF verifier（或更严格的 Prevail 之类）验证；二是只接受云厂商预先审核、签名验证过的程序。无论哪种，隔离都由 verifier、受限 helper 的地址绑定、以及共享状态的同步协议三者联合保证，任何单独一环都不足以宣称跨租户安全~\cite{source8}。
-
-最后，下放永远带着回退。HyperTurtle 明确保留了 L1 的原始处理路径作为兜底：内存池耗尽、fault log 写满、加锁失败、遇到不支持的情况时，一律回退到传统的、需要进入 L1 的处理方式~\cite{source8}。这意味着 hyperupcall 优化的是“适用热路径”而不是取消 L1；L1 仍是功能完整性与复杂功能的最终承担者。
-
-\subsubsection{主案例：EPT fault处理}\label{sec:nested-ht-ept}
-
-EPT fault 展示了同一逻辑操作引发多次跨层往返的情形。论文的 EPT hyperupcall 面向 shmem 文件后备内存，不能直接当作所有内存后备方式的通用处理器。图~\ref{fig:hyperupcall} 已给出通用对比，这里补上具体的步数差异：L2 因 EPT02 缺项触发退出到 L0（第 1 步），L0 检查 EPT12 是否有合法映射（第 2 步）；若没有，L0 把 EPT fault 注入 L1 并进入 L1（第 3 步），L1 在 EPT12 里建立映射（第 4 步），L1 试图恢复 L2、又 trap 回 L0（第 5 步），L0 进入 L2（第 6 步），L2 重执行触发 fault 的指令——由于 EPT02 仍缺项，再次退出（第 7 步），L0 再次查 EPT12（第 8 步）、找到条目、用其补全 EPT02，最后再进入 L2（第 9 步）。一次缺页共产生 6 次 world-switch，而非嵌套下的 2 次~\cite{source8}。EPT fault hyperupcall 做的事，就是把这个“缺项→进 L1 建映射→重执行→再缺项→再查表”的循环里属于 L1 的那段，替换成 L0 内的一段 eBPF：在发现 EPT12 缺项时，hyperupcall 先检查已有映射和并发状态；适用时复用映射或从预分配内存池取帧，再更新 EPT12 与 fault log，L0 随即完成 fault 处理并恢复 L2，省掉了进入 L1 及其后的重执行往返~\cite{source8}。
-
-正确性的难点全部在共享状态上。第一是内存来源：eBPF 上下文里分配内存过于复杂，因此 L1 维护一个预分配的帧池放在共享 map 里，hyperupcall 从池里取帧，池空则回退；实验表明 4096 帧足以避免同步补充，论文全文用这一池大小~\cite{source8}。第二是与 L1 的一致性：hyperupcall 改动了 EPT12，L1 必须知道；它通过共享的环形 fault log 记录自己映射过的 L2-PA，L1 在下一次进入 L1 的 vm-exit 时把这些条目对应的 L1-VA 映射进 VMM 地址空间；log 写满则回退。反过来，VMM（或 virtiofsd 等外部进程）可能先行建了映射而 hyperupcall 尚未察觉，因此 L1 把 VMM 的 cr3 拷进共享 map，让 hyperupcall 能用 \code{bpf_probe_read_hyperupcall} 遍历 VMM 页表、判断该地址是否已有映射；同时把 shmem 的页故障处理函数包一层，先加锁、再查 EPT12 是否已被 hyperupcall 映射、再走原处理、最后把对应的 L2-PA 写进环形 page fault log，以弥合“hyperupcall 已建映射但 L1 尚未看到”的窗口~\cite{source8}。第三是并发：整个 hyperupcall 包在一把锁里，锁也经共享 map 暴露给 L1，使 L1 处理 EPT fault 时能取同一把锁；受 eBPF 锁实现限制，取锁失败即回退~\cite{source8}。核心评议因此不在“eBPF 跑得快”，而在“减少跨层切换之后，如何仍正确维护两层内存管理状态”——池、双日志、cr3 共享与锁，本质上是把原本主要由 L1 内存管理路径维护的状态关系，改造成 L0 与 L1 之间可并发、可回退的协议。
-
-\subsubsection{扩展案例：网络策略与性能采样}\label{sec:nested-ht-net-prof}
-
-网络案例回应的是 DVH 的取舍。DVH 把 L0 提供的虚拟网卡直接分配给 L2，数据路径短、性能好，但 L1 失去策略控制；HyperTurtle 的做法不是退回两层 virtio，而是让 L1 把过滤、限速、监控逻辑写成 eBPF 挂到 L0 的网络接口 hook 上，从而在保留 DVH 直通数据路径的同时恢复 L1 的控制。论文实现了四个示例程序：什么都不做的 pass、按源 IP 过滤的无状态防火墙、可运行时调参的限速器、以及监控 L2 全部 TCP 连接的 TCP-Top~\cite{source8}。必须澄清的是，这里的“分配”是把 L0 的虚拟网卡（vNIC）交给 L2，而不是物理网卡直通；隔离靠“每个 hyperupcall 只能跑在它所属 L1 拥有的虚拟接口上”来保证，且每个 vNIC 可挂不同程序，使不同 L2 各受其 L1 策略约束。为接回 Kubernetes，论文实现了一个 CNI 插件做动态接口管理：pod 创建时经 hypercall 请求 L0 建 vNIC、由 QEMU 热插到 L1、CNI 再配置网络命名空间与地址，从而在 k8s 管理面下既用 DVH 又保留 L1 的网络函数~\cite{source8}。这个案例的意义在于展示通用性：hyperupcall 不局限于内存，还能把“数据处理”与“策略控制”重新拼在同一层。
-
-profiling 案例则展示另一种下放形态：采样本身不需要 L1 提供信息，只需把样本送回 L1。普通情况下，从 L1 对 L2 采样一次，L0 注入 NMI、L1 处理采样并访问 MSR、\code{vmread}/\code{vmwrite} 改 VMCS、再执行 \code{vm-enter}，全程约 26 次 world-switch；其中 L0 注入 NMI 到 L1 要 7.8$\mu$s，模拟 L1 的 \code{vm-enter} 还要 8$\mu$s~\cite{source8}。HyperTurtle 借 Linux 已有的 perf 接口把 eBPF 注册成采样事件，新增 helper \code{vcpu_probe} 让 hyperupcall 直接读 L2 的寄存器，样本经共享 map 的环形缓冲送回 L1；注册过程把采样限制到相应执行对象的 guest 状态，并结合受控寄存器读取接口维持访问边界~\cite{source8}。两个案例合起来说明方法通用，但结论有边界：它们证明的是“特定处理路径可以减少往返”，而不是“所有中断都能直接注入”或“所有设备都能完整下放”。
-
-\input{figures/hyperupcall.tex}
-
-图~\ref{fig:hyperupcall} 概括了 HyperTurtle 的通用形态：普通嵌套下，一个需要 L1 处理的事件要走 L2→L0→L1→L0→L2；HyperTurtle 下，已注册的处理逻辑在 L0 内以 eBPF 形式就地执行，成功后直接恢复 L2；资源不足、竞争或不支持时沿虚线回退到 L1 的原始路径。图中的成功恢复与回退两条分支，与上文 EPT 案例的步数拆解一致——注意 EPT 缺页还包含重执行后再次退出等步骤，成功下放只减少特定处理所需的切换，并不取消 L1 作为正确性与复杂功能兜底的存在。
-
-\subsection{实验证据评议}\label{sec:ht-eval}
-
-本章的实验证据与上一章不属于同一坐标系：Turtles 报告的是 2010 年硬件上嵌套相对单层的减速，HyperTurtle 报告的是 2025 年平台上相对普通嵌套的改善，两者的硬件、软件年代与实验目标都不同，不能拼成统一的性能排名。因此本章只讨论 HyperTurtle 自身的主张能否被其数据支持，上一章的数字仅作为问题背景引用。
-
-HyperTurtle 进一步把热路径收益与端到端效果联系起来。表~\ref{tab:nested-evidence} 只列出各项实验直接报告的比较结果，不将动机分析中的绝对延迟与另一个实验中的加速比拼接成推算值。EPT fault 的平均与尾延迟、服务启动时间、网络往返延迟和采样处理时间是不同度量，不能统一称为“系统加速”。
-
-\begin{table}[tbp]
+\begin{figure}[htbp]
 \centering
-\small
-\caption[HyperTurtle 的代表性评测结果]{HyperTurtle 的代表性评测结果（原论文报告，非本文复现）。EPT 采用正文\S5.1的数值；图9a的平均改善标注为5.26，二者存在末位差异，不影响此处机制比较。\cite{source8}}
-\label{tab:nested-evidence}
-\begin{tabularx}{\linewidth}{@{}P{2.4cm}YYY@{}}
-\toprule
-度量与条件 & 基线 & 报告结果 & 出处 \\
-\midrule
-EPT fault 处理 & 普通嵌套 L2 & 平均延迟改善约 $5.25\times$，99p 改善 $4.76\times$ & \S5.1，图9a \\
-Kata 服务启动 & 相同镜像的普通嵌套 & 4\,KiB 页平均缩短27\%；2\,MiB页缩短8\% & \S5.2，图10 \\
-UDP 往返延迟 & Nested-VirtIO & HT+Firewall 平均约60.53\,$\mu$s，基线约90.2\,$\mu$s & \S5.1，表7及正文 \\
-采样处理时间，1000\,Hz & L1 对 L2 的常规采样 & HT 对 L2 的处理时间改善 $7.15\times$ & \S5.1，图9b \\
-\bottomrule
-\end{tabularx}
-\end{table}
+\includegraphics[width=0.98\linewidth]{figures/hyperturtle-fig1.png}
+\caption[嵌套虚拟化中的 world-switch 问题]{嵌套虚拟化中的 world-switch 问题。(a) 普通嵌套：L2 的 EPT fault 由 L1 hypervisor 处理，L0 转发该事件并增加跨层切换；(b) HyperTurtle：L0 通过 hyperupcall 就地执行下放的 eBPF 处理逻辑。引自 Ben Zur et al., USENIX ATC 2025, Figure 1~\cite{source8}。}
+\label{fig:ht-worldswitch}
+\end{figure}
 
-EPT fault 结果对应的是在 Kata 虚拟机内触发内存按需映射的微基准。减少进入 L1 的往返，使平均延迟接近论文中的非嵌套参考，但只有在负载频繁触发此类缺页时，收益才会显著传导。服务启动实验因此具有解释力：论文从发出启动命令开始计时，直到容器中的 Web 服务能够响应请求，而不是只计 guest 内核 boot。图10还区分了4\,KiB与2\,MiB页；使用大页时，Kata 在 L1 中仍以4\,KiB页映射 L2 内核的部分路径，因而 hyperupcall 仍有作用，但端到端改善较小\cite[\S5.1--5.2]{source8}。这组对照也提醒读者：页大小、后备内存组织和启动阶段都会改变缺页优化的收益。
+\subsection{从两张 EPT 缺项定位问题}\label{sec:ht-motiv}
 
-网络结果须同时比较性能与控制能力。无 L1 策略的 Direct-Assignment 是性能参考，不能冒充功能完全相同的基线。论文用 HT+Pass 与 HT+Firewall 区分基础设施成本和策略程序成本：前者平均延迟约55\,$\mu$s，接近直接分配的54.5\,$\mu$s；后者增加到约60.53\,$\mu$s，但保留了 L1 的防火墙控制，并低于两层 virtio 的约90.2\,$\mu$s\cite[\S5.1]{source8}。由此可以支持“缩短路径而保留策略”的主张，却不能推导出所有 eBPF 网络策略都具有相同开销。profiling 的端到端实验则在相同直接分配网络上改变采样频率：4000\,Hz与1000\,Hz下，论文报告满足500\,$\mu$s查询延迟约束时的 Memcached 吞吐分别提升26\%与12\%\cite[\S5.2, 图14]{source8}。采样更频繁时，减少采样路径切换的价值更明显；这不是无采样负载的通用吞吐提升。
+L2 中的一次普通访存先由 L2 页表把 L2 虚拟地址翻译成 L2 物理地址（L2-PA），再由硬件当前装载的 $EPT_{0\to2}$ 把 L2-PA 翻译成 L0 物理地址（L0-PA）。后一跳缺项会触发 EPT violation，CPU 从 L2 退出到 L0，原访存指令尚未完成。L0 此时面对的不是一个孤立的“缺页”请求，而是两个必须分别回答的问题：L1 是否已经为这段 L2 内存分配了 L1 物理帧，以及 L0 是否已经把这个结果拼进 $EPT_{0\to2}$。
 
-实验外推还受平台与系统配置约束。HyperTurtle 使用双路 Xeon Silver 4216，固定 vCPU 与 vhost 线程在同一 NUMA 节点内的不同物理核，关闭 SMT，并设置\code{idle=poll}与\code{nopti}；吞吐压力实验还增加 Kata 的 vCPU 数量，以使单个 vhost 线程达到瓶颈\cite[\S5, Table 6]{source8}。这些配置改变空闲等待、隔离开销或资源争用条件，不能据此替生产环境预先确定收益。实现规模也应按组成理解：论文 Table 5 分列 L0 KVM、eBPF 框架、QEMU 安装器与动态接口、L1 内存管理和 KVM，以及各个 hyperupcall 的代码量。只引用“KVM 改动151行”会漏掉其他必要部分\cite[\S4.6]{source8}。
+为区分这两件事，记发生 fault 的 L2-PA 为 $P$，承载它的 L1 物理帧地址为 $M$，最终机器物理地址为 $H$。两张表与 L0 自有的 $EPT_{0\to1}$ 形成如下关系：
 
-\subsection{局限与可检验的后续问题}\label{sec:ht-open}
+\begin{equation}
+EPT_{1\to2}:P\rightarrow M,\qquad
+EPT_{0\to1}:M\rightarrow H,\qquad
+EPT_{0\to2}:P\rightarrow H.
+\end{equation}
 
-EPT hyperupcall 的边界在原型中十分具体：它不支持分配大页，对尚未映射进 L1 VMM 页表的部分 page-cache 页面不能直接处理，且全局 EPT hook 暂时只允许一个 L1 为一个 L2 使用该处理器。复杂 L1 功能的并发同步也限制了完整下放，因此原有 L1 路径必须保留\cite[\S4.8]{source8}。这些是特定 EPT 原型的限制，不能扩大成“所有网络 hook 都只能服务一个 L2”；网络路径利用每个虚拟接口的 hook，有不同的实例组织方式。
+其中 $EPT_{1\to2}$ 是 L1 KVM 为 L2 维护的蓝本，$EPT_{0\to1}$ 描述 L1 自身内存到真实机器内存的映射，$EPT_{0\to2}$ 则是 L0 为运行 L2 而合成的影子表。HyperTurtle 的 hook 不在每次 $EPT_{0\to2}$ 缺项时都接管，而是放在 L0 检查蓝本之后：只有 $EPT_{1\to2}$ 也为 non-present 时，才需要替代原本进入 L1 的那一段处理~\cite{source8}。
 
-下一步首先应测量一致性成本，而不只继续压缩最理想路径的延迟。可以逐步增加 L1 与 L2 的并发度，分别控制帧池补充频率、fault log 占用率和锁竞争，报告回退率、99p延迟及宿主 CPU 时间。这样才能判断省下的切换是否被共享状态维护重新消耗。把 EPT hook 扩展为 per-L2 handler 后，还应检验多个 L1 同时注册、撤销与更新程序时的隔离和资源消耗。对生产适用性的评估，则需比较不同 SMT、NUMA、空闲等待和页表隔离设置，而不是假定论文配置代表所有云主机。
+\begin{lstlisting}[style=pseudopy,caption={L0 对一次 L2 EPT fault 的缺项分流（逻辑伪代码）},label={lst:ht-dispatch}]
+def handle_l2_ept_fault(P, access_type):
+    # CPU 已从 L2 退出；P 是 L2-PA，指令尚未完成
+    if ept12_lookup(P).present:
+        # L1 已分配 L1 帧，L0 只需合成影子表项
+        install_ept02_from_ept12(P)
+        resume_l2()
+        return
 
-安全讨论应区分程序执行约束与系统级信任关系。验证器不能代替 helper 的权限设计、VM归属检查和共享状态协议；可加载程序的执行时间、内存消耗与撤销机制也需要纳入审计。HyperTurtle 假定 L0 能够读取并处理 L1 的相关状态，这与把 L0 排除出信任边界的机密虚拟机模型不同，不能直接移植其安全结论。VM迁移、动态策略更新和更深层嵌套还要求迁移或重新建立程序、maps及hook的关系；这些工作既涉及性能，也涉及生命周期的一致性。
+    # EPT12 也缺项：传统路径在这里把 fault 注入 L1
+    if hyperupcall_ept_fault(P, access_type) == SUCCESS:
+        install_ept02_from_ept12(P)  # hyperupcall 已补好蓝本
+        resume_l2()                  # 不进入 L1
+    else:
+        inject_ept_fault_to_l1(P, access_type)
+        resume_l1()                  # 保留原有慢路径
+\end{lstlisting}
 
-云租户自主管理虚拟机、Kata/serverless 与租户级网络策略为这种方法提供了应用场景。对国内云平台而言，值得评估的是既保留租户控制又减少嵌套管理往返的接口，而不是仅复制一个实验加速比。Turtles 展示了如何把多层语义落实到现有硬件，HyperTurtle 则在这一基础上重新安排部分处理逻辑的位置；其推广价值取决于下放后的状态同步、安全和运维成本能否保持可控。
+代码块~\ref{lst:ht-dispatch} 的第一条分支说明，$EPT_{0\to2}$ 缺项本身不等于 hyperupcall 必须工作；蓝本已有映射时，L0 直接补影子表即可。后一条分支才是本章的主线：hyperupcall 的任务是补 $EPT_{1\to2}$，不是替 L0 直接写 $EPT_{0\to2}$。它返回成功后，L0 仍按原有规则完成 $P\rightarrow M\rightarrow H$ 的合成，再恢复 L2。
+
+普通嵌套下，这个“蓝本也缺”的情形造成六次 world-switch：L2 首次退出、L0 进入 L1、L1 恢复动作陷入 L0、L0 进入 L2、L2 重执行后再次退出、L0 最终恢复 L2。HyperTurtle 成功时把路径压成 $L2\rightarrow L0\rightarrow L2$：省掉的是进入 L1 建蓝本、L1 的恢复尝试，以及 L2 第一次重执行后的第二次 fault；L0 对影子表的建立并未被取消~\cite{source8}。
+
+\subsection{hyperupcall 的注册与状态准备}\label{sec:hyperturtle-design}
+
+HyperTurtle 把 L1 定义的这段建表逻辑写成 eBPF 程序，称为 hyperupcall。安装与执行必须分开理解：安装时，L1 通过 hypercall 把编译后的程序交给 L0，经 L0 的 KVM 与用户态安装组件完成验证和加载，再把程序链接到 L0 的 EPT fault hook。加载与链接拆成两个 hypercall，使同一程序可以挂到多个 hook 而不必重复加载。完成安装后，程序不再经 hypercall 调用，而是由 L0 在处理 L2 事件时直接触发~\cite{source8}。
+
+这段程序不能任意读写 L1。新增 helper \code{bpf_probe_read_hyperupcall} 只允许它读取有效、已映射且属于其所属 L1 的物理内存；eBPF verifier 检查程序自身的内存访问、循环等约束，VM 归属与 helper 的地址检查再限定它能看哪一份 guest 状态。L0 与 L1 之间还通过共享的数组型 eBPF map 交换数据，map 经共享内存 PCI 设备映射到 L1，因而双方可以并发访问同一份状态，而不是每次借 VM-exit 传递消息~\cite{source8}。
+
+EPT 案例需要预先准备四类共享状态：L1 维护的预分配帧池、QEMU 进程的页表根 \code{cr3}、记录 hyperupcall 所建映射的 fault log，以及记录 L1 侧 shmem 缺页的 page fault log；另有一把双方都能获取的共享锁。eBPF 上下文不适合完成复杂的内存分配，所以帧池由 L1 异步补充，或在其因 VM-exit 获得处理机会时批量补充。论文实验采用 4096 帧的池，以避免同步补充；池空不是错误，而是回退条件~\cite{source8}。
+
+\subsection{沿一次 EPT fault 展开 HyperTurtle}\label{sec:nested-ht-ept}
+
+本例采用论文限定的 shmem 文件后备内存：L1 中的 QEMU 通过 \code{mmap} 获得一段自己的虚拟内存，再把它注册为 L2 的 guest RAM。为叙述具体，以下直接称这一 VMM 为 QEMU；Cloud Hypervisor 在该路径中承担相同角色。论文原型面向 QEMU、Cloud Hypervisor 与 Kata Containers 所采用的这类后备方式，不能把结论直接推广到任意内存后端~\cite{source8}。
+
+\subsubsection{先分清 QEMU 页表与 EPT}\label{sec:ht-qemu-pagetable}
+
+QEMU 虽然管理 L2，本身仍是 L1 中的一个用户态进程。它访问自己的代码、堆和所映射的 L2 内存时，使用 L1 内核为其维护的普通进程页表：
+
+\begin{equation}
+\text{QEMU 的 L1-VA }V
+\xrightarrow{\text{QEMU 页表}}\text{L1-PA }M.
+\end{equation}
+
+这里的“QEMU 页表”就是前面所说的 VMM 页表，不是 EPT，也不是 L2 中某个进程的页表。其根地址保存在 QEMU 进程的 \code{cr3} 中。QEMU 把一段起始虚拟地址为 $V_{\text{base}}$ 的内存注册成起始 L2-PA 为 $P_{\text{base}}$ 的内存槽后，同一页便有两个不同的名字：L2 看到 $P$，QEMU 看到 $V$。二者数值不必相等，逻辑位置由下式对应：
+
+\begin{equation}
+V=V_{\text{base}}+(P-P_{\text{base}}).
+\end{equation}
+
+QEMU 页表负责 $V\rightarrow M$，$EPT_{1\to2}$ 负责 $P\rightarrow M$。两棵树的根指针、输入地址空间和维护者都不同，不存在一方包含另一方的关系；它们只是可以在输出端指向同一个 L1 物理帧。L2 运行时使用 EPT，QEMU 自己访问该页时使用普通页表。HyperTurtle 读取 QEMU 页表，正是为了检查这页是否已经有一个可复用的 $M$。
+
+\subsubsection{在 L0 内补全 L1 的蓝本}\label{sec:ht-upcall-body}
+
+现在回到代码块~\ref{lst:ht-dispatch} 中调用 hyperupcall 的路径。L0 发现 $EPT_{1\to2}[P]$ 为 non-present 后，调用 hyperupcall，并传入 $P$ 与读写类型。程序首先尝试获取共享锁；成功后才检查 QEMU 页表、并发日志和帧池。整个快路径可概括为代码块~\ref{lst:ht-ept-body}。
+
+\begin{lstlisting}[style=pseudopy,caption={hyperupcall 为缺失的蓝本寻找 L1 物理帧（逻辑伪代码）},label={lst:ht-ept-body}]
+def hyperupcall_ept_fault(P, access_type):
+    if not try_lock(shared_ept_lock):
+        return FALLBACK
+    if hyperupcall_fault_log.is_full():
+        unlock(shared_ept_lock)
+        return FALLBACK
+
+    # 由内存槽的位置对应，算出 QEMU 看到的虚拟地址
+    V = qemu_userspace_base(P) + (P - qemu_guest_phys_base(P))
+
+    # 路径一：QEMU 已有 V -> M，复用这页，不再分配帧
+    M = walk_qemu_page_table(shared_qemu_cr3, V)
+    if M is not None:
+        ept12_install(P, M, access_type)
+        hyperupcall_fault_log.append(P)
+        unlock(shared_ept_lock)
+        return SUCCESS
+
+    # QEMU 页表也没有：先看 L1 侧是否正在处理同一页
+    if page_fault_log.contains(P):
+        unlock(shared_ept_lock)
+        return FALLBACK
+
+    # 路径二：消费 L1 预分配的帧，补 EPT12 并通知 L1
+    M = frame_pool.pop()
+    if M is None:
+        unlock(shared_ept_lock)
+        return FALLBACK
+
+    ept12_install(P, M, access_type)
+    hyperupcall_fault_log.append(P)
+    unlock(shared_ept_lock)
+    return SUCCESS
+\end{lstlisting}
+
+遍历 QEMU 页表时，hyperupcall 并不把 QEMU 的 \code{cr3} 装入当前 CPU，也不切换到 QEMU 地址空间。它只是把共享的 \code{cr3} 当作页表根指针，使用受限 helper 逐级读取 QEMU 的普通页表项。若查到 $V\rightarrow M$，说明 QEMU 已经为这页建立好 L1 侧映射，程序可以直接构造 $EPT_{1\to2}:P\rightarrow M$，无需消耗帧池。
+
+若 QEMU 页表也缺项，程序还不能立即分配，因为 L1 的 shmem 缺页路径或 \code{virtiofsd} 可能正在处理同一页。page fault log 用来暴露这类并发活动；若其中已有 $P$，hyperupcall 放弃快路径，由 L1 沿原有逻辑完成处理。只有没有并发冲突时，程序才从帧池取出 $M$，写入 $EPT_{1\to2}$，并把 $P$ 追加到 hyperupcall fault log。帧池耗尽、日志写满、取锁失败或遇到不支持的情况，都返回回退而不是在 L0 中勉强完成~\cite{source8}。
+
+无论映射来自 QEMU 页表还是帧池，hyperupcall 返回成功时改变的都只是蓝本及共享日志。随后 L0 重新取得 $P\rightarrow M$，经 $EPT_{0\to1}$ 得到 $M\rightarrow H$，建立 $EPT_{0\to2}:P\rightarrow H$，恢复 L2。L2 重执行原访存指令，这一次第二级翻译已经齐全，不再需要为同一缺项第二次退出。
+
+\subsubsection{恢复 L2 之后，L1 仍须同步}\label{sec:ht-ept-sync}
+
+快路径结束于 L2，并不意味着 L1 的所有状态已经同步。尤其是从帧池取页时，$EPT_{1\to2}$ 已有 $P\rightarrow M$，QEMU 页表却可能仍没有对应的 $V\rightarrow M$。若让这种状态无限期滞留，QEMU 与其他共享该文件后备内存的组件就可能看到不一致的映射。HyperTurtle 因而把“让 L2 立即继续运行”与“把变化补记到 L1”拆成两个阶段。
+
+代码块~\ref{lst:ht-ept-sync} 的两个函数有不同的触发者。第一个由 L1 KVM 在下一次因 VM-exit 进入 L1 时执行，用来消费 hyperupcall 留下的 fault log。第二个则是对 L1 原有 shmem page-fault handler 的包装：当 L1 中的 QEMU 或 \code{virtiofsd} 等文件后备内存使用者访问一个尚未在自身地址空间建立映射的 shmem 页，因而触发 L1 的普通页故障时，L1 内核进入这个包装函数。它不是 L2 发生 EPT fault 时由 L0 调用的 hyperupcall；前者处理 L1 进程地址空间的缺页，后者处理 L2 第二级地址翻译的缺项。
+
+\begin{lstlisting}[style=pseudopy,caption={L1 后续补偿与 shmem 缺页路径的同步（逻辑伪代码）},label={lst:ht-ept-sync}]
+def l1_on_next_vmexit():
+    for P in hyperupcall_fault_log.drain():
+        V = qemu_va_for_l2_pa(P)
+        fault_qemu_va_into_address_space(V)  # 补 QEMU 页表等 L1 状态
+
+def wrapped_l1_shmem_fault(P):
+    spin_lock(shared_ept_lock)
+    if ept12_lookup(P).present:
+        map_existing_ept12_page_to_l1(P)  # hyperupcall 已先建映射
+    original_shmem_fault_handler()
+    page_fault_log.append(P)              # 告知 L0 侧程序：L1 处理过此页
+    unlock(shared_ept_lock)
+\end{lstlisting}
+
+代码块~\ref{lst:ht-ept-sync} 的两个函数有不同触发者，此处分别说明。第一个由 L1 KVM 在下一次因 VM-exit 进入 L1 时执行，消费 hyperupcall fault log，并把其中 L2-PA 对应的 L1-VA fault 进 QEMU 地址空间。第二个则是对 L1 原有 shmem page-fault handler 的包装：当 L1 中的 QEMU 或 \code{virtiofsd} 等文件后备内存使用者访问一个尚未在自身地址空间建立映射的 shmem 页，因而触发 L1 的普通页故障时，L1 内核进入这个包装函数。它不是 L2 发生 EPT fault 时由 L0 调用的 hyperupcall；前者处理 L1 进程地址空间的缺页，后者处理 L2 第二级地址翻译的缺项。包装函数先取得同一把锁，再检查 $EPT_{1\to2}$ 是否已被 hyperupcall 填好；若已填好就复用该映射，随后执行原处理并记录 page fault log。这样，即使尚未发生一次进入 L1 的退出，L1 侧也不会忽略 L0 已经建立的映射~\cite{source8}。
+
+这组机制也限定了 HyperTurtle 的实际贡献。它不是把 L1 从内存管理中删除，而是把 L2 继续运行所必需的蓝本建立留在 L0，把 L1 可见状态的补偿经日志延后；锁与双日志承担并发一致性，帧池承担资源供给，原 L1 路径承担所有快路径不适用的情况。优化的核心不是“eBPF 本身更快”，而是把一次跨层操作改造成一个有共享状态协议的就地处理路径。
+
+\subsection{实验证据与适用边界}\label{sec:ht-eval}
+
+上述机制的收益应当用同一条 EPT 路径衡量，而不能把不同子系统的加速比合并成“系统加速”。论文在 Kata 虚拟机内触发 1\,GiB 内存的按需映射，报告 HyperTurtle 相对普通嵌套 L2 的 EPT fault 平均延迟改善约 $5.25\times$、99p 延迟改善约 $4.76\times$；平均延迟接近其非嵌套参考，99p 则仍有约 8\% 差距~\cite[\S5.1]{source8}。这些数字支持的是“适用缺页热路径的往返显著减少”，不是任意访存都获得同样加速。
+
+端到端意义来自 Kata 服务启动实验：论文从发出启动命令计时至容器内 Web 服务能够响应请求，而非只测 guest 内核 boot。不同镜像下，4\,KiB 页配置的平均启动时间缩短 27\%，2\,MiB 页配置为 8\%。大页情形仍有部分路径以 4\,KiB 页映射 L2 内核，因此优化并未完全失去作用，但收益较小~\cite[\S5.2]{source8}。这组结果说明收益依赖缺页在负载中的占比、页大小与后备内存组织；对已经建立好映射的稳定运行阶段，不能由启动结果外推同样的提升。
+
+实验平台与配置也构成结论边界。论文使用双路 Xeon Silver 4216，固定 vCPU 与 vhost 线程在同一 NUMA 节点内的不同物理核，关闭 SMT，并设置 \codeplain{idle=poll} 与 \codeplain{nopti}。这些条件会影响空闲等待与隔离成本，因此本文只把数值视为论文报告，不将其当作生产环境的预先保证~\cite[\S5, Table 6]{source8}。
+
+原型本身的限制更直接：EPT hyperupcall 不支持分配大页，对尚未映射进 QEMU 页表的部分 page-cache 页面不能直接处理，且全局 EPT hook 暂时只允许一个 L1 为一个 L2 使用该处理器。复杂 L1 功能的并发同步也限制了完整下放，所以原有 L1 路径必须长期保留~\cite[\S4.8]{source8}。后续评测若只继续降低理想路径延迟，仍不足以回答其可部署性；还应控制帧池补充频率、日志占用率和锁竞争，报告回退率、尾延迟及宿主 CPU 时间，检验省下的切换是否被一致性维护重新消耗。
+
+安全边界同样需要与性能分开评价。verifier 约束的是程序执行形态，helper 的地址授权、VM 归属检查、日志协议与锁才决定它实际能访问和修改什么。该机制假定 L0 能读取并处理 L1 的相关状态，不能直接套用到把 L0 排除出信任边界的机密虚拟机模型。沿着本例可以得到一个更准确的总结：HyperTurtle 没有消除 $EPT_{0\to2}$ fault，也没有取代 L1 的内存管理；它把两张表都缺项时原本必须进入 L1 的一段工作，改为 L0 内可验证、可回退且带事后同步的处理，从而保留多层语义而缩短其关键路径。

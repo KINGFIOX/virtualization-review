@@ -1,7 +1,7 @@
 \section{嵌套虚拟化（一）：Turtles 与多层语义的单层复用}\label{sec:nested}
 
 
-前两章分别考察了纯软件模拟与以 Arm 为代表的硬件辅助虚拟化，二者处理的都是“一层 hypervisor 直接管理一层 guest”的问题。本章把对象再推进一层：当 hypervisor 自己就跑在一台虚拟机里时，机器状态、地址映射与事件策略要如何组合才既正确又可接受地快。架构口径限定为 x86-64，即 amd64 这一 ISA 称谓，讨论的机制都落在 Intel 的 VMX 指令集、VMCS 控制结构与 EPT 扩展页表上，不使用 AMD SVM 的 VMCB/NPT 术语，也不把 Arm 的 EL2 异常级名称移植过来。嵌套这一问在文献里分成前后两段：OSDI 2010 年的 Turtles 回答“在缺乏架构支持时怎样正确实现嵌套”~\cite{source7}，USENIX ATC 2025 年的 HyperTurtle 回答“在已经能嵌套的前提下怎样减少不必要的跨层往返”~\cite{source8}。前一问是后一问的前提，二者不能按同一标准横向比较性能，只能按“谁控制资源、关键路径怎么走、何时介入、代价多大”这条主线先后展开。本章处理第一问，即多层语义如何被复用到底层的单层硬件支持上；下一章处理第二问，即往返成本如何削减。
+前两章分别考察了纯软件模拟与以 Arm 为代表的硬件辅助虚拟化，二者处理的都是“一层 hypervisor 直接管理一层 guest”的问题。本章把对象再推进一层：当 hypervisor 自己就跑在一台虚拟机里时，机器状态、地址映射与事件策略要如何组合才既正确又可接受地快。架构口径限定为 x86-64，即 amd64 这一 ISA 称谓，讨论的机制都落在 Intel 的 VMX 指令集、VMCS 控制结构与 EPT 扩展页表上，不使用 AMD SVM 的 VMCB/NPT 术语，也不把 Arm 的 EL2 异常级名称移植过来。唯一的例外在第~\ref{sec:nested-notrap} 节：那里要说明“敏感指令并非一律只能靠陷入实现”这一结论并不限于某一家的扩展，因此把 Arm 的 FEAT\_NV 作为对照引入；该对照只用于说明取舍结构，不把两套机制写成同构，也不改变本章其余部分以 VMX 为口径的叙述。嵌套这一问在文献里分成前后两段：OSDI 2010 年的 Turtles 回答“在缺乏架构支持时怎样正确实现嵌套”~\cite{source7}，USENIX ATC 2025 年的 HyperTurtle 回答“在已经能嵌套的前提下怎样减少不必要的跨层往返”~\cite{source8}。前一问是后一问的前提，二者不能按同一标准横向比较性能，只能按“谁控制资源、关键路径怎么走、何时介入、代价多大”这条主线先后展开。本章处理第一问，即多层语义如何被复用到底层的单层硬件支持上；下一章处理第二问，即往返成本如何削减。
 
 \subsection{问题建立：当hypervisor自己也在虚拟机里}\label{sec:nested-problem}
 
@@ -42,6 +42,19 @@ Turtles 是 KVM 之上的嵌套虚拟化实现，目标是运行未经修改的 
 
 这张 EPT02 是按需建立的。L0 以一张空 EPT02 启动 L2，当 L2 访问的 GPA 在 EPT02 里缺项时触发 EPT violation 退出到 L0；L0 检查 L1 维护的 EPT12 是否已有该地址的合法映射——有，则把 EPT12 里的 L2→L1 映射与 EPT01 里的 L1→host 映射拼接后写入 EPT02 对应项；没有，说明这个缺页属于 L1 应负责的范围（例如 L1 尚未为该 GPA 分配内存），L0 就把退出交给 L1 处理，待 L1 更新 EPT12 后再回来补 EPT02~\cite{source7}。这个分流规则与 CPU 维度的退出归属判定同源：谁有权填这张表，缺项就归谁。
 
+图~\ref{fig:nested-ept-fault} 把这条路走了一遍。左栏 (a) 是处理流程，右栏 (b) 记录同一过程中 EPT12 与 EPT02 的对应项状态，两栏的编号一一对齐。
+
+L2 访问某个 GPA 时，EPT02 里对应项不存在，触发一次 EPT violation 退出到 L0（第 1 步）。L0 随即查 EPT12，看这个地址在 L1 为 L2 建的表里是否已有合法映射（第 2 步）；若也没有，说明该页尚未由 L1 分配，L0 把 EPT fault 注入 L1 并立刻进入 L1（第 3 步）。L1 在 EPT12 里为该地址建立映射（第 4 步），然后试图恢复 L2，这次恢复动作本身又被 L0 截住（第 5 步），L0 才真正进入 L2（第 6 步）。L2 重执行刚才触发 fault 的那条指令，由于 EPT02 里这一项仍然为非存在，又一次退出（第 7 步）。L0 再走一遍 EPT12（第 8 步），这次找到了条目，用它的值补全 EPT02，然后重新进入 L2 恢复执行（第 9 步）。整个过程共六次 world-switch，而非嵌套下同样的缺页只需两次~\cite{source8}。
+
+右栏的三行状态说明这九步究竟改变了什么：起初 EPT12 与 EPT02 的对应项都不存在；第 4 步之后 EPT12 已存在而 EPT02 仍缺，这正是 L2 重执行后再次退出的原因；直到第 8 步把 EPT12 的值搬进 EPT02，两栏才都成为存在。也就是说，EPT02 不是自己算出来的，而是 EPT12 的一份滞后副本——两次遍历、两次退出，代价就落在“复制发生得比需要更晚”这件事上。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/nested-ept-fault.png}
+\caption[嵌套虚拟化下的 EPT fault 处理]{嵌套虚拟化下的 EPT fault 处理。(a) 九步处理流程，编号与正文一致：L2 触发缺项退出、L0 查 EPT12、缺项时注入 L1、L1 建表、L1 恢复被截、L0 进 L2、L2 重执行再退出、L0 再查 EPT12、补全 EPT02 后恢复。(b) 同一过程中 EPT12 与 EPT02 对应项的状态：由“皆缺”到“EPT12 有而 EPT02 缺”，再到“皆有”。引自 Ben Zur et al., USENIX ATC 2025, Figure 4~\cite{source8}。}
+\label{fig:nested-ept-fault}
+\end{figure}
+
 一致性维护是这套方案的固定开销。为保持 EPT02 与 EPT12 同步，L0 把 EPT12 所在内存设为只读，L1 一旦改写就 trap，L0 据此更新 EPT02 的相应项；L0 还要 trap L1 的 \code{INVEPT}，把 L1 意图的失效翻译成对自己 EPT 缓存的失效。两类 trap 的频率都由 EPT 表项数决定，因此 L0 允许用大页为 guest 内存做后备以缩小 EPT 表，也允许 L1 使用 VPID 给 TLB 条目打标签以免每次切换都冲刷 TLB；由于两侧都可自由选择 VPID 编号、可能冲突，L0 还需把 L1 自选的编号重映射到自己的有效编号~\cite{source7}。需要区分两类缺项：EPT02 缺项归 L0 补，L2 自身的普通页故障通常仍由 L2 处理，除非上层配置了相应拦截~\cite{source7}。
 
 \begin{figure}[htbp]
@@ -71,6 +84,112 @@ Turtles 的成就是正确性与可行性：在不修改 guest hypervisor 的前
 
 论文的宏观负载报告给出同一方向的证据：在 KVM 同时充当 L0 与 L1 并启用多维分页的配置下，相对单层 guest，kernbench 的运行时间增加 14.5\%，SPECjbb 分数下降约 7.8\%；改用修改 L1、使其直接读写 VMCS12 的 DRW 配置后，两项数值分别变为 10.3\% 与 6.3\%~\cite[\S4.1, Table 2]{source7}。这些是论文报告值，不是本文复现。数值差异说明管理路径的密集程度会影响嵌套成本，摘要中的较低开销不能解释为适用于全部工作负载的上界；DRW 改动了 guest hypervisor，必须与未修改 guest 的基线分别讨论。
 
+\subsection{三条路径在今天的实现}\label{sec:nested-code}
+
+第~\ref{sec:turtles-cost} 节的成本分析停在“退出被逐级放大”这个结论上。那套合成逻辑在今天的 KVM 里被重写过多次，但三条路径的形状保留了下来：退出要判归属，地址要把三级压成两级，设备映射要在两层之间折叠。下面用 Linux 7.0.14 的 Intel VMX 与 VT-d 实现各给一段伪代码，只保留控制流，删去错误处理、优化分支与并发细节。这些片段是当前实现的旁证，既不是 2010 年原型的源码，也不构成任何性能主张~\cite{source5}。
+
+\subsubsection{退出的归属与转发}\label{sec:nested-code-exit}
+
+L2 触发退出后，L0 并不无条件转发，而是按“L0 要不要 → L1 要不要”的顺序问两遍。\code{nested_vmx_reflect_vmexit()} 的前两问就是这个顺序：L0 自己需要的退出（外部中断、NMI、EPT violation、PML 满等）直接截下，L1 没在 VMCS12 里要求 trap 的退出也留在 L0；只有两问都答“是”，才把 CPU 写进 VMCS02 的退出信息搬回 VMCS12，再用 VMCS12 的 host state 填 VMCS01 的 guest state，让 L1 以为这是一次从 L2 直达自己的退出。代码块~\ref{lst:nested-exit} 把这一轮往返压成三个函数。
+
+\needspace{26\baselineskip}
+\begin{lstlisting}[caption={一次 $L2 \to L0 \to L1 \to L0 \to L2$ 往返的控制流。依据 arch/x86/kvm/vmx/nested.c 的 nested\_vmx\_reflect\_vmexit()、\_\_nested\_vmx\_vmexit()、nested\_vmx\_run() 整理，为示意而非逐行对应。},label={lst:nested-exit},style=pseudopy]
+def nested_vmx_reflect_vmexit(vcpu, exit_reason):
+    """L2 已退出到 L0：这次退出归谁？两问"""
+    if l0_wants_exit(vcpu, exit_reason):      # L0 自己的范畴，一票否决
+        return False
+    if not l1_wants_exit(vcpu, exit_reason):  # 查 VMCS12 的 trap 位与位图
+        return False                          # L1 没要求，留在 L0
+    return True                               # 两问皆“是”，才向 L1 反射
+
+def __nested_vmx_vmexit(vcpu, exit_reason):
+    """把这次退出改写成“L2 -> L1”"""
+    sync_vmcs02_to_vmcs12(vcpu)               # 退出信息搬回 VMCS12
+    vmx_switch_vmcs(vcpu, &vcpu.vmcs01)       # 装载运行 L1 的结构
+    load_vmcs12_host_state(vcpu)              # VMCS12.host → VMCS01.guest
+
+def l1_and_back(vcpu):
+    """L1 处理完再回来：vmread/vmwrite 各自又是退出"""
+    emulate_cpuid(vcpu)                       # 内含多次 vmread / vmwrite
+    prepare_vmcs02(vcpu, vmcs12)              # vmresume 被截：重新合成
+    enter_guest_mode(vcpu)                    # 最后一次 L0 -> L2
+\end{lstlisting}
+
+三个函数对应一条完整链路。归属判定由 \code{nested_vmx_reflect_vmexit()} 提前做出，只有两问皆“是”的退出才值得跨层；随后 \code{__nested_vmx_vmexit()} 完成 0-2 状态到 1-2 视角的改写，让 L1 以为自己被直接退出；\code{l1_and_back()} 则把回程压在一起——L1 处理时每条 \code{vmread}/\code{vmwrite} 都要再走一遍前两个函数，最后它的 \code{vmresume} 被 L0 截住，重新合成 VMCS02 才回到 L2。要注意 \code{l0_wants_exit()} 与 \code{l1_wants_exit()} 都是长 switch：前者把外部中断、NMI、EPT violation 等三十来种退出原因逐一列出，后者按 VMCS12 的各个 trap 控制位分支，而 VMX 指令类（\code{vmclear}/\code{vmptrld}/\code{vmread}/\code{vmwrite}/\code{invept} 等）一律返回“L1 要”——注释里的说法是，这样才能让 L1 为它的 L2 模拟这些指令，从而支撑三层嵌套~\cite{source5}。
+
+\subsubsection{EPT on EPT：三级地址压成两级}\label{sec:nested-code-ept}
+
+今天 KVM 的做法与 Turtles 的多维分页同源：不把 L1 的 EPT 当作可直接装载的结构，而是以它为蓝本建一份影子上下文，把“L2 GPA → L1 GPA”这一段交给它，硬件真正装载的仍是 L0 自己的 EPT。\code{nested_ept_init_mmu_context()} 做的就是这个切换——它把 \code{vcpu.arch.mmu} 指向 \code{guest_mmu}（负责 L2 GPA → L1 GPA），把 \code{walk_mmu} 指向 \code{nested_mmu}（负责 L2 GVA → L1 GPA，即先走 L2 自己的页表、再走 EPT12）。源码注释把这件事说得很直白：两个上下文的 \code{gva_to_gpa} 是互换的~\cite{source5}。代码块~\ref{lst:nested-ept} 给出从进入 L2 到补齐一个缺项的路径。
+
+\needspace{26\baselineskip}
+\begin{lstlisting}[caption={EPT 叠 EPT 的初始化与缺项补齐。依据 arch/x86/kvm/vmx/nested.c（nested\_ept\_init\_mmu\_context、nested\_ept\_inject\_page\_fault）、arch/x86/kvm/mmu/mmu.c（kvm\_init\_shadow\_ept\_mmu）、arch/x86/kvm/x86.c（translate\_nested\_gpa）整理。},label={lst:nested-ept},style=pseudopy]
+def nested_ept_init_mmu_context(vcpu):
+    """进入 L2 之前：给 L1 的 EPT12 建一层影子"""
+    eptp12 = vmcs12.ept_pointer             # L1 为 L2 建的 EPT 根
+    kvm_init_shadow_ept_mmu(vcpu, eptp12)   # 以 EPT12 为蓝本建上下文
+    vcpu.arch.mmu      = &vcpu.arch.guest_mmu    # 负责 L2 GPA -> L1 GPA
+    vcpu.arch.walk_mmu = &vcpu.arch.nested_mmu   # 负责 L2 GVA -> L1 GPA
+
+def translate_nested_gpa(vcpu, l2_gpa):
+    """第一跳：用 EPT12 把 L2 GPA 翻成 L1 GPA"""
+    mmu = vcpu.arch.mmu                     # 此时指向 guest_mmu
+    return mmu.gva_to_gpa(vcpu, l2_gpa, PFERR_USER_MASK)
+
+def ept_violation_in_l0(vcpu, l2_gpa, access):
+    """EPT02 缺项，硬件退出到 L0：补表还是交给 L1？"""
+    l1_gpa = translate_nested_gpa(vcpu, l2_gpa)     # 第一跳：查 EPT12
+    if l1_gpa == INVALID_GPA:
+        inject_ept_violation_to_l1(vcpu, l2_gpa)    # EPT12 也没映射 → 归 L1
+        return
+    hpa = gfn_to_hva(vcpu, l1_gpa >> PAGE_SHIFT)    # 第二跳：L0 的 memslot / EPT01
+    fill_spte(vcpu, l2_gpa, hpa, access)            # 折叠结果写进 EPT02，一步到 HPA
+\end{lstlisting}
+
+关键在于 \code{fill_spte()} 只写一份表：不是“先查 EPT12 再查 EPT01”留给硬件在每次访存时走两遍，而是把两跳的终点预先算出来写进 L0 的 EPT，此后硬件对 L2 GPA 只做一次遍历。代价与 Turtles 描述的一致——这张表要与 EPT12 保持同步，L1 改动自己的 EPT 时必须让对应的影子项失效，所以 \code{nested_ept_inject_page_fault()} 里除了把 fault 注入 L1，还要按 \code{vmcs12.ept_pointer} 对应的 EP4TA 做一次地址级失效：TLB 认的是 EP4TA 而不是完整 EPTP，凡挂在这张 EPT 上的影子都得同步~\cite{source5}。L1 没有映射时，退出就带着 L2 GPA 注入给 L1，责任判定仍是“缺项归谁填”。
+
+\subsubsection{IOMMU：两级硬件与中间的第三跳}\label{sec:nested-code-iommu}
+
+设备侧的逻辑链更长：DMA 用的是 L2 的访存地址，真实设备要用 host 物理地址，中间还夹着 L1。Turtles 当年面对的硬件只支持一级翻译，两层映射只能靠半虚拟化或模拟 IOMMU 压缩成一层；今天 VT-d 的嵌套翻译给了两级，但两级仍不等于无限级。Linux 的实现落在 PASID 项上：一个 stage-1 域嵌套在 stage-2 域之上，S1 的页表基址由 guest 侧提供，S2 的基址由 L0 持有，翻译类型标成 \code{nested}。
+
+\needspace{26\baselineskip}
+\begin{lstlisting}[caption={VT-d 嵌套翻译的表项配置。依据 drivers/iommu/intel/nested.c（intel\_iommu\_domain\_alloc\_nested）与 drivers/iommu/intel/pasid.c（intel\_pasid\_setup\_nested、pasid\_pte\_config\_nestd）整理。},label={lst:nested-iommu},style=pseudopy]
+def alloc_nested_stage1(dev, s2_domain):
+    """L1 经 iommufd 申请一个嵌套在 L0 的 S2 之上的 S1 域"""
+    if (flags & IOMMU_HWPT_ALLOC_NEST_PARENT) == 0:
+        return -EINVAL                      # 父域必须显式声明可被嵌套
+    return new_dmar_domain(s2_domain=s2_domain)     # 域只是容器，生效在 PASID 项
+
+def pasid_pte_config_nestd(iommu, pte, s1_cfg, s2_domain):
+    """VT-d 的两级：guest 给第一级，host 给第二级"""
+    pasid_set_flptr(pte, s1_cfg.pgtbl_addr)     # S1 页表基址（guest 提供）
+    pasid_set_slptr(pte, s2_domain.sspt)        # S2 页表基址（L0 持有）
+    pasid_set_translation_type(pte, PASID_ENTRY_PGTT_NESTED)   # 值 3
+    pasid_set_domain_id(pte, s2_domain.did)
+    pasid_flush_caches(iommu, pte, pasid, did)  # 改表之后必须失效 IOTLB
+
+def dma_translate(dev, pasid, iova):
+    """硬件在每次 DMA 时做的事，软件只在建表与失效时介入"""
+    pte = pasid_entry(dev, pasid)
+    gpa = walk(pte.flptr, iova)                 # 第一级
+    return walk(pte.slptr, gpa)                 # 第二级 -> HPA
+\end{lstlisting}
+
+把这段和上一小节并读，会看到同一个约束换了对象：硬件给两级，逻辑上要三级（L2 的设备地址 → L2 PA → L1 PA → PA），中间那一跳必须被折进两侧之一，而不能指望硬件替软件多走一次。今天的 Linux 里已经并存两种折法：新路径把两级交给 PASID 项的 S1/S2 直接翻译，注释里称为 nested translation；旧路径用影子页表把 guest 的映射合并进 L0 的表，注释里称为 legacy nested translation~\cite{source5}。前者要求硬件支持且要求父域声明 \code{NEST_PARENT}，后者则在设备不支持的组合上兜底。这也正是第~\ref{sec:nested-dev} 节那个取舍在今天的版本：\code{mode} 换成“硬件嵌套翻译还是影子”，而“DMA 地址归谁分配、由谁合并”这个问题一字未变。
+
+三条路径放在一起，Turtles 的抽象就不再只是 2010 年的一段历史。归属判定在 \code{nested_vmx_reflect_vmexit()} 里仍是两问；地址折叠在 \code{translate_nested_gpa()} 与 \code{fill_spte()} 里仍是先查蓝本再写终点；设备地址在 PASID 项里仍是 S1/S2 两级加一层软件兜底。变化的是实现位置与加速手段——控制结构换成了影子 VMCS，表项换成了支持大页的 EPT，IOMMU 从“只有一级”变成了“两级加嵌套类型”——而这些变化都没有取消归属判定，也没有把三级变成免费的。
+
+\subsection{边界：敏感不等于必须陷入}\label{sec:nested-notrap}
+
+第~\ref{sec:turtles-cost} 节把 \code{vmread}/\code{vmwrite} 的逐条退出记为嵌套成本的主要放大源，但这容易被读成“嵌套本来就该如此”。真正决定要不要退出的，是这条指令的效果落到了哪里，而不是它是否敏感。在单层 VMX 基线上，L1 在 non-root 环境执行 \code{vmread}/\code{vmwrite} 必然退出，原因是处理器手上没有一份可以替 L1 接收这次访问的控制结构，访问只能由 L0 在软件里接住、再按 VMCS 更新规则改写；一旦硬件能提供这样一份副本，同样的指令就能原地执行，L0 退到副本与自身状态之间的同步位置上。第~\ref{sec:nested-cpu} 节末尾区分过 Turtles 的软件影子与 Intel 后来的同名硬件特性，本节补齐后者究竟省掉了什么。
+
+Intel 在 Haswell 一代加入的 VMCS shadowing 就是为这件事准备的：据 HyperTurtle 的回顾，它使 L0 不必在 L1 每次执行 \code{vmwrite}/\code{vmread} 时都将其陷入~\cite{source8}。具体分工是 L0 仍为 L1 维护真实的 VMCS01，并在这份结构的 link pointer 里填入另一块 shadow VMCS 的物理地址，同时准备两张各 4\,KB 的 VMREAD/VMWRITE 位图，每个 VMCS 字段编码占一位：被放行的字段不产生退出，处理器直接把读写落到影子结构上，只有位图标记拦截的字段才退出给 L0。KVM 的实现给出了这套筛选的粒度：\path{arch/x86/kvm/vmx/vmcs_shadow_fields.h} 用两张表分别列出可写字段（当前 24 项）与只读字段（当前 12 项），\code{init_vmcs_shadow_fields()} 先把两张位图整页置为拦截、再逐项清除表内字段的拦截位，\code{set_current_vmptr()} 在处理 L1 的 \code{vmptrld} 时打开 \code{SECONDARY_EXEC_SHADOW_VMCS} 并写入 link pointer~\cite{source5}。影子里的可写字段不会立刻回到 VMCS12：L0 在 L1 请求进入 L2、释放当前 VMCS12（\code{vmclear}/\code{vmxoff}）以及导出嵌套状态时，才用 \code{copy_shadow_to_vmcs12()} 把改动拷回~\cite{source5}。Turtles 的 DRW 配置在软件里追的是同一件事：改掉 L1 让它直读直写 VMCS12，用 14.5\% 到 10.3\% 的差距估计“不让 L1 的 \code{vmread}/\code{vmwrite} 退出”能换回多少~\cite{source7}。shadowing 的意义在于把这份收益还给未经修改的 L1。
+
+这套机制有明确的边界。位图之外的字段仍要退出，硬件也只向下提供一层影子：KVM 在为 L2 合成控制时反而要清掉 \code{SECONDARY_EXEC_SHADOW_VMCS}、改用软件模拟该能力~\cite{source5}。省掉的是字段访问的往返，不是嵌套本身的开销。
+
+Arm 一侧的对应问题落在系统寄存器上。guest hypervisor 在 EL1 需要访问一批只在 EL2 定义的寄存器与指令，朴素模型下这些访问是未定义的。Armv8.3 的 FEAT\_NV 把未定义换成可拦截：置 \code{HCR_EL2.NV} 后，EL1 对这类寄存器与指令的访问改为陷入 EL2，交由 hypervisor 模拟~\cite{source4}。Armv8.4 的 FEAT\_NV2 再进一步：\code{HCR_EL2.NV} 与 \code{NV2} 同为 1 时，EL1 对若干 EL2 寄存器的访问由硬件直接改写成对 \code{VNCR_EL2} 所指页面的 load/store，\code{NV1} 决定被改写的是全部已实现的 EL2 寄存器还是一个更窄的集合；各寄存器在该页内的字节偏移由架构固定~\cite{source4}。于是“读一个 EL2 寄存器”从一次异常变成一次普通访存：页面本身仍在 L0 手里，建立、失效与同步由软件负责。KVM 的 \path{arch/arm64/include/asm/vncr_mapping.h} 逐项列出这些偏移，\code{kvm_map_l1_vncr()} 维护一份针对该页的伪 TLB 并按需建立映射；CPU 能力上 Linux 只按 NV2 判定（\code{ARM64_HAS_NESTED_VIRT}），不单独支持只实现 FEAT\_NV 的处理器~\cite{source5}。
+
+两者常被并置，但不宜推成同构：一边让字段访问落到一份影子控制结构，一边把寄存器访问改写成内存访问，指令、状态与失效规则都不相同。可以说的是同一件事——逐条陷入不是敏感指令的唯一归宿，只要架构能提供一份 L0 仍能约束的副本，退出就可以从关键路径上挪走。挪走之后代价并没有消失，只是转成了副本的一致性维护：KVM 里针对 FEAT\_NV2 的注释就指出 guest hypervisor 可以绕过 L0 改写 \code{HCR_EL2}、从而影响宿主侧的异常路由与屏蔽，需要额外代码把状态收回来~\cite{source5}。这类扩展削掉的是往返，不是 L0 的最终控制权，也不是“所有敏感指令都可以直接执行”：真正要改动真实硬件状态的操作，例如 VMEntry/VMExit、TLB 失效与中断投递，仍要回到 L0。
+
 \subsection{小结：正确性之后剩下的成本}\label{sec:turtles-summary}
 
-至此可以把 Turtles 的结论压成两句。正确性一侧，它把三层语义压进单层硬件支持：VMX 指令被 trap-and-emulate，VMCS12 作为需求说明书由 L0 合成为 VMCS02，EPT12 与 EPT01 折叠成 EPT02，L2 的 DMA 经虚拟或半虚拟 IOMMU 落到真实 IOMMU，而每一次退出由 L0 判定归属——属于它的事件就地处理后直接恢复 L2，属于 L1 的事件才转发。代价一侧，任何需要 L1 处理的退出都要走 $L2 \to L0 \to L1 \to L0 \to L2$，而 L1 处理时执行的 \code{vmread}/\code{vmwrite} 各自又触发一次对 L0 的退出，退出被逐级放大。两个边界需要重申：本章描述的是 2010 年原型在缺少嵌套架构支持时的实现，不能当作当前 KVM 全部路径的写照；DRW 这类配置改动了 guest hypervisor，其数字不能与未修改 guest 的结果混用。硬件后来加入的 VMCS shadowing 一类辅助改变的是复用的成本，而不是复用的必要性。成本究竟落在哪一段路径上、又该如何削减，是下一章的问题。
+至此可以把 Turtles 的结论压成两句。正确性一侧，它把三层语义压进单层硬件支持：VMX 指令被 trap-and-emulate，VMCS12 作为需求说明书由 L0 合成为 VMCS02，EPT12 与 EPT01 折叠成 EPT02，L2 的 DMA 经虚拟或半虚拟 IOMMU 落到真实 IOMMU，而每一次退出由 L0 判定归属——属于它的事件就地处理后直接恢复 L2，属于 L1 的事件才转发。代价一侧，任何需要 L1 处理的退出都要走 $L2 \to L0 \to L1 \to L0 \to L2$，而 L1 处理时执行的 \code{vmread}/\code{vmwrite} 各自又触发一次对 L0 的退出，退出被逐级放大。两个边界需要重申：本章描述的是 2010 年原型在缺少嵌套架构支持时的实现，不能当作当前 KVM 全部路径的写照；DRW 这类配置改动了 guest hypervisor，其数字不能与未修改 guest 的结果混用。上一小节补充的第三点与此并列：硬件后来加入的辅助手段削减的是复用的成本，而不是复用的必要性，敏感指令并非在架构里一律只能靠陷入实现。成本究竟落在哪一段路径上、又该如何削减，是下一章的问题。
