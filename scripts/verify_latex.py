@@ -55,8 +55,8 @@ for name in ['00-intro','01-software','02-hardware','03-turtles','04-hyperturtle
     chapters[name] = {'title':titles,'sections':sections,'cjk_characters':cjk}
     if len(titles)!=1 or cjk<1000:
         errors.append('Incomplete chapter: '+name)
-    # 软件与硬件两章必须各自独立覆盖四个维度
-    if name in ['01-software','02-hardware']:
+    # 硬件章必须独立覆盖四个维度（软件章只讲 CPU 维的 TCG）
+    if name in ['02-hardware']:
         for word in ['CPU','内存','中断','设备']:
             if not any(word in t for t in sections):
                 errors.append('Missing independent dimension '+name+': '+word)

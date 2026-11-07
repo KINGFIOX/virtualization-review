@@ -1,6 +1,6 @@
 \chapter{硬件辅助虚拟化：Arm架构与KVM}\label{sec:hardware}
 
-本章把执行载体换成具备硬件虚拟化能力的 AArch64 平台。研究对象是 AArch64 guest 运行在 AArch64 host 之上，CPU 架构以 Armv8.6-A 手册为准；GICv3/v4 与 SMMUv3 是各自独立的系统组件规范，其实现与否由具体 SoC 决定，不能由 CPU 的 ISA 版本直接推定某平台必然具备全部功能\cite{source4,source9,source10}。实现参照为 Linux 7.0.14 源码树中的 KVM/arm64、VGIC 与 SMMUv3 驱动\cite{source5}。与前章纯软件方案的根本差别在于：guest 的绝大多数指令与访存由真实处理器直接执行，hypervisor 不再解释每条指令，而是退到异常级 EL2 上，只在受控操作或外部事件发生时介入。软件与硬件之间的分工因此重新划分——上一章由软件完成的敏感指令捕获、地址翻译、中断注入，本章部分由处理器与系统组件承担；但设备功能、资源管理策略与组合仍留在软件。下面仍沿 CPU、内存、中断、设备四个维度展开，最后用一次直通设备 I/O 把四者串起。
+本章把执行载体换成具备硬件虚拟化能力的 AArch64 平台。研究对象是 AArch64 guest 运行在 AArch64 host 之上，CPU 架构以 Armv8.6-A 手册为准；GICv3/v4 与 SMMUv3 是各自独立的系统组件规范，其实现与否由具体 SoC 决定，不能由 CPU 的 ISA 版本直接推定某平台必然具备全部功能\cite{source4,source9,source10}。实现参照为 Linux 7.0.14 源码树中的 KVM/arm64、VGIC 与 SMMUv3 驱动\cite{source5}。与前章纯软件方案的根本差别在于：guest 的绝大多数指令与访存由真实处理器直接执行，hypervisor 不再解释每条指令，而是退到异常级 EL2 上，只在受控操作或外部事件发生时介入。软件与硬件之间的分工因此重新划分——上一章由 TCG 翻译器与 helper 完成的敏感指令捕获，以及全系统模拟中由软件承担的地址翻译与中断注入，本章部分由处理器与系统组件承担；但设备功能、资源管理策略与组合仍留在软件。下面仍沿 CPU、内存、中断、设备四个维度展开，最后用一次直通设备 I/O 把四者串起。
 
 四个维度在软件一侧并不散落，KVM 为每台虚拟机维护一个权威的聚合对象——\code{struct kvm}。QEMU 进程每次发出 \code{KVM_CREATE_VM} 请求，内核便分配并初始化一个实例\footnote{Linux: \path{virt/kvm/kvm_main.c}，\code{kvm_dev_ioctl_create_vm()}；定义见 \path{include/linux/kvm_host.h}，arm64 专属部分见 \path{arch/arm64/include/asm/kvm_host.h}。}，此后该虚拟机的 vCPU、内存区间、中断路由与设备总线都从这里出发索引。代码块~\ref{lst:kvm-vm} 按四个维度节选了这份结构，可视为本章随后各节的软件地图。
 

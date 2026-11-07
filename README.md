@@ -1,6 +1,6 @@
 # 虚拟化技术 · LaTeX 初稿
 
-主文件：`main.tex`。正文按新提纲组织为第 0—4 部分（嵌套虚拟化拆为两章），结语不编号；软件与硬件两部分各自覆盖 CPU、内存、中断、设备四个维度，嵌套两章分别处理“把多层语义做对”与“削减跨层往返”。
+主文件：`main.tex`。正文按新提纲组织为第 0—4 部分（嵌套虚拟化拆为两章），结语不编号；软件一章只讲 CPU 维（TCG IR 翻译管线），硬件一章覆盖 CPU、内存、中断、设备四个维度，嵌套两章分别处理“把多层语义做对”与“削减跨层往返”。
 
 ## 构建
 
@@ -18,7 +18,7 @@ python scripts/verify_latex.py
 ## 文件结构
 
 - `chapters/00-intro.tex`：Popek–Goldberg 与四维框架。
-- `chapters/01-software.tex`：QEMU TCG 全系统软件虚拟化。
+- `chapters/01-software.tex`：QEMU TCG 动态翻译（RISC-V → TCG IR → x86-64）。
 - `chapters/02-hardware.tex`：Armv8.6-A 与 KVM 的硬件辅助机制。
 - `chapters/03-turtles.tex`：嵌套问题建立、Turtles 四维机制、Turtles 开销与评测、小结。
 - `chapters/04-hyperturtle.tex`：性能问题重新定位、HyperTurtle 通用机制与两个案例、实验评议、局限与开放问题。
