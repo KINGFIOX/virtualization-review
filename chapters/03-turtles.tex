@@ -1,7 +1,11 @@
 \chapter{嵌套虚拟化（一）：Turtles 与多层语义的单层复用}\label{sec:nested}
 
 
-前两章分别考察了纯软件模拟与以 Arm 为代表的硬件辅助虚拟化，二者处理的都是“一层 hypervisor 直接管理一层 guest”的问题。本章把对象再推进一层：当 hypervisor 自己就跑在一台虚拟机里时，机器状态、地址映射与事件策略要如何组合才既正确又可接受地快。架构口径限定为 x86-64，即 amd64 这一 ISA 称谓，讨论的机制都落在 Intel 的 VMX 指令集、VMCS 控制结构与 EPT 扩展页表上，不使用 AMD SVM 的 VMCB/NPT 术语，也不把 Arm 的 EL2 异常级名称移植过来。唯一的例外在第~\ref{sec:nested-notrap} 节：那里要说明“敏感指令并非一律只能靠陷入实现”这一结论并不限于某一家的扩展，因此把 Arm 的 FEAT\_NV 作为对照引入；该对照只用于说明取舍结构，不把两套机制写成同构，也不改变本章其余部分以 VMX 为口径的叙述。嵌套这一问在文献里分成前后两段：OSDI 2010 年的 Turtles 回答“在缺乏架构支持时怎样正确实现嵌套”~\cite{source7}，USENIX ATC 2025 年的 HyperTurtle 回答“在已经能嵌套的前提下怎样减少不必要的跨层往返”~\cite{source8}。前一问是后一问的前提，二者不能按同一标准横向比较性能，只能按“谁控制资源、关键路径怎么走、何时介入、代价多大”这条主线先后展开。本章处理第一问，即多层语义如何被复用到底层的单层硬件支持上；下一章处理第二问，即往返成本如何削减。
+前两章分别考察了纯软件模拟与以 Arm 为代表的硬件辅助虚拟化，二者处理的都是“一层 hypervisor 直接管理一层 guest”的问题。本章把对象再推进一层：当 hypervisor 自己就跑在一台虚拟机里时，机器状态、地址映射与事件策略要如何组合才既正确又可接受地快。架构口径限定为 x86-64，即 amd64 这一 ISA 称谓，讨论的机制都落在 Intel 的 VMX 指令集、VMCS 控制结构与 EPT 扩展页表上，不使用 AMD SVM 的 VMCB/NPT 术语，也不把 Arm 的 EL2 异常级名称移植过来。
+
+架构口径有一处例外，在第~\ref{sec:nested-notrap} 节：那里要说明“敏感指令并非一律只能靠陷入实现”这一结论并不限于某一家的扩展，因此把 Arm 的 FEAT\_NV 作为对照引入；该对照只用于说明取舍结构，不把两套机制写成同构，也不改变本章其余部分以 VMX 为口径的叙述。
+
+嵌套这一问在文献里分成前后两段：OSDI 2010 年的 Turtles 回答“在缺乏架构支持时怎样正确实现嵌套”~\cite{source7}，USENIX ATC 2025 年的 HyperTurtle 回答“在已经能嵌套的前提下怎样减少不必要的跨层往返”~\cite{source8}。前一问是后一问的前提，二者不能按同一标准横向比较性能，只能按“谁控制资源、关键路径怎么走、何时介入、代价多大”这条主线先后展开。本章处理第一问，即多层语义如何被复用到底层的单层硬件支持上；下一章处理第二问，即往返成本如何削减。
 
 \section{问题建立：当hypervisor自己也在虚拟机里}\label{sec:nested-problem}
 
@@ -40,11 +44,18 @@ Turtles 是 KVM 之上的嵌套虚拟化实现，目标是运行未经修改的 
 
 第三栏的关键是让两层都用 EPT 这一硬件结构，而不是让任何一层退化成影子页表。为此 L0 先向 L1 暴露 EPT 能力，使 L1 相信自己也能建 EPT，于是 L1 为 L2 建出 EPT12；但硬件只有一张 EPT，L0 不能直接装载 EPT12，便把它与自己的 EPT01 折叠成一张 EPT02。折叠的语义就是两次翻译的串接：L2 GPA 经 EPT12 得到 L1 GPA，再经 EPT01 得到 L0 的 host PA；EPT02 记录的是这条链的终点，因此硬件在实际执行时只需一次 EPT 遍历就完成 L2 GPA→host PA。图中第三栏下方那条从 L2 physical 直指 L0 physical 的 EPT02 箭头就是这个合成结果，而 EPT12 与 EPT01 两条箭头表示它由哪两段拼接而来；同时 L2 自己的页表（图中 GPT）仍然保留，负责 L2 VA→L2 GPA 这一层，硬件不替 L2 遍历它~\cite{source7}。
 
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.98\linewidth]{figures/turtles-mmu-models.png}
+\caption[三种嵌套 MMU 虚拟化模型]{三种嵌套 MMU 虚拟化模型：1. 影子页表叠在影子页表上；2. 影子页表叠在 EPT 上；3. 多维分页，即 EPT 叠在 EPT 上。四层方框自下而上为 L0 physical、L1 physical、L2 physical、L2 virtual，弧形箭头标注每段由哪张表承担（GPT、SPT12、SPT02、EPT01、EPT12、EPT02）。本文只展开第 3 栏。引自 Ben-Yehuda et al., OSDI 2010, Figure 4~\cite{source7}。}
+\label{fig:turtles-mmu}
+\end{figure}
+
 这张 EPT02 是按需建立的。L0 以一张空 EPT02 启动 L2，当 L2 访问的 GPA 在 EPT02 里缺项时触发 EPT violation 退出到 L0；L0 检查 L1 维护的 EPT12 是否已有该地址的合法映射——有，则把 EPT12 里的 L2→L1 映射与 EPT01 里的 L1→host 映射拼接后写入 EPT02 对应项；没有，说明这个缺页属于 L1 应负责的范围（例如 L1 尚未为该 GPA 分配内存），L0 就把退出交给 L1 处理，待 L1 更新 EPT12 后再回来补 EPT02~\cite{source7}。这个分流规则与 CPU 维度的退出归属判定同源：谁有权填这张表，缺项就归谁。
 
 图~\ref{fig:nested-ept-fault} 把这条路走了一遍。左栏 (a) 是处理流程，右栏 (b) 记录同一过程中 EPT12 与 EPT02 的对应项状态，两栏的编号一一对齐。
 
-L2 访问某个 GPA 时，EPT02 里对应项不存在，触发一次 EPT violation 退出到 L0（第 1 步）。L0 随即查 EPT12，看这个地址在 L1 为 L2 建的表里是否已有合法映射（第 2 步）；若也没有，说明该页尚未由 L1 分配，L0 把 EPT fault 注入 L1 并立刻进入 L1（第 3 步）。L1 在 EPT12 里为该地址建立映射（第 4 步），然后试图恢复 L2，这次恢复动作本身又被 L0 截住（第 5 步），L0 才真正进入 L2（第 6 步）。L2 重执行刚才触发 fault 的那条指令，由于 EPT02 里这一项仍然为非存在，又一次退出（第 7 步）。L0 再走一遍 EPT12（第 8 步），这次找到了条目，用它的值补全 EPT02，然后重新进入 L2 恢复执行（第 9 步）。整个过程共六次 world-switch，而非嵌套下同样的缺页只需两次~\cite{source8}。
+L2 访问某个 GPA 时，EPT02 里对应项不存在，触发一次 EPT violation 退出到 L0（第 1 步）。L0 随即查 EPT12，看这个地址在 L1 为 L2 建的表里是否已有合法映射（第 2 步）；若也没有，说明该页尚未由 L1 分配，L0 把 EPT fault 注入 L1 并立刻进入 L1（第 3 步）。L1 在 EPT12 里为该地址建立映射（第 4 步），然后试图恢复 L2，这次恢复动作本身又被 L0 截住（第 5 步），L0 才真正进入 L2（第 6 步）。L2 重执行刚才触发 fault 的那条指令，由于 EPT02 里这一项仍然为非存在，又一次退出（第 7 步）。L0 再走一遍 EPT12（第 8 步），这次找到了条目，用它的值补全 EPT02，然后重新进入 L2 恢复执行（第 9 步）。整个过程共六次 world-switch，而在非嵌套环境下，同样的缺页只需两次~\cite{source8}。
 
 右栏的三行状态说明这九步究竟改变了什么：起初 EPT12 与 EPT02 的对应项都不存在；第 4 步之后 EPT12 已存在而 EPT02 仍缺，这正是 L2 重执行后再次退出的原因；直到第 8 步把 EPT12 的值搬进 EPT02，两栏才都成为存在。也就是说，EPT02 不是自己算出来的，而是 EPT12 的一份滞后副本——两次遍历、两次退出，代价就落在“复制发生得比需要更晚”这件事上。
 
@@ -56,13 +67,6 @@ L2 访问某个 GPA 时，EPT02 里对应项不存在，触发一次 EPT violati
 \end{figure}
 
 一致性维护是这套方案的固定开销。为保持 EPT02 与 EPT12 同步，L0 把 EPT12 所在内存设为只读，L1 一旦改写就 trap，L0 据此更新 EPT02 的相应项；L0 还要 trap L1 的 \code{INVEPT}，把 L1 意图的失效翻译成对自己 EPT 缓存的失效。两类 trap 的频率都由 EPT 表项数决定，因此 L0 允许用大页为 guest 内存做后备以缩小 EPT 表，也允许 L1 使用 VPID 给 TLB 条目打标签以免每次切换都冲刷 TLB；由于两侧都可自由选择 VPID 编号、可能冲突，L0 还需把 L1 自选的编号重映射到自己的有效编号~\cite{source7}。需要区分两类缺项：EPT02 缺项归 L0 补，L2 自身的普通页故障通常仍由 L2 处理，除非上层配置了相应拦截~\cite{source7}。
-
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=0.98\linewidth]{figures/turtles-mmu-models.png}
-\caption[三种嵌套 MMU 虚拟化模型]{三种嵌套 MMU 虚拟化模型：1. 影子页表叠在影子页表上；2. 影子页表叠在 EPT 上；3. 多维分页，即 EPT 叠在 EPT 上。四层方框自下而上为 L0 physical、L1 physical、L2 physical、L2 virtual，弧形箭头标注每段由哪张表承担（GPT、SPT12、SPT02、EPT01、EPT12、EPT02）。本文只展开第 3 栏。引自 Ben-Yehuda et al., OSDI 2010, Figure 4~\cite{source7}。}
-\label{fig:turtles-mmu}
-\end{figure}
 
 \subsection{中断：事件归属、转发与注入}\label{sec:nested-irq}
 
@@ -174,7 +178,7 @@ def dma_translate(dev, pasid, iova):
     return walk(pte.slptr, gpa)                 # 第二级 -> HPA
 \end{lstlisting}
 
-把这段和上一小节并读，会看到同一个约束换了对象：硬件给两级，逻辑上要三级（L2 的设备地址 → L2 PA → L1 PA → PA），中间那一跳必须被折进两侧之一，而不能指望硬件替软件多走一次。今天的 Linux 里已经并存两种折法：新路径把两级交给 PASID 项的 S1/S2 直接翻译，注释里称为 nested translation；旧路径用影子页表把 guest 的映射合并进 L0 的表，注释里称为 legacy nested translation~\cite{source5}。前者要求硬件支持且要求父域声明 \code{NEST_PARENT}，后者则在设备不支持的组合上兜底。这也正是第~\ref{sec:nested-dev} 节那个取舍在今天的版本：\code{mode} 换成“硬件嵌套翻译还是影子”，而“DMA 地址归谁分配、由谁合并”这个问题一字未变。
+把这段和上一小节并读，会看到同一个约束换了对象：硬件给两级，逻辑上要三级（L2 的设备地址 → L2 PA → L1 PA → PA），中间那一跳必须被折进两侧之一，而不能指望硬件替软件多走一次。今天的 Linux 里已经并存两种折法：新路径把两级交给 PASID 项的 S1/S2 直接翻译，注释里称为 nested translation；旧路径用影子页表把 guest 的映射合并进 L0 的表，注释里称为 legacy nested translation~\cite{source5}。前者要求硬件支持且要求父域声明 \code{NEST_PARENT}，后者则在设备不支持的组合上兜底。这也正是第~\ref{sec:nested-dev} 节那个取舍在今天的版本：可选项从“半虚拟化 IOMMU 还是模拟 IOMMU”换成了“硬件嵌套翻译还是影子页表”，而“DMA 地址归谁分配、由谁合并”这个问题没有变。
 
 三条路径放在一起，Turtles 的抽象就不再只是 2010 年的一段历史。归属判定在 \code{nested_vmx_reflect_vmexit()} 里仍是两问；地址折叠在 \code{translate_nested_gpa()} 与 \code{fill_spte()} 里仍是先查蓝本再写终点；设备地址在 PASID 项里仍是 S1/S2 两级加一层软件兜底。变化的是实现位置与加速手段——控制结构换成了影子 VMCS，表项换成了支持大页的 EPT，IOMMU 从“只有一级”变成了“两级加嵌套类型”——而这些变化都没有取消归属判定，也没有把三级变成免费的。
 
@@ -192,4 +196,4 @@ Arm 一侧的对应问题落在系统寄存器上。guest hypervisor 在 EL1 需
 
 \section{小结：正确性之后剩下的成本}\label{sec:turtles-summary}
 
-至此可以把 Turtles 的结论压成两句。正确性一侧，它把三层语义压进单层硬件支持：VMX 指令被 trap-and-emulate，VMCS12 作为需求说明书由 L0 合成为 VMCS02，EPT12 与 EPT01 折叠成 EPT02，L2 的 DMA 经虚拟或半虚拟 IOMMU 落到真实 IOMMU，而每一次退出由 L0 判定归属——属于它的事件就地处理后直接恢复 L2，属于 L1 的事件才转发。代价一侧，任何需要 L1 处理的退出都要走 $L2 \to L0 \to L1 \to L0 \to L2$，而 L1 处理时执行的 \code{vmread}/\code{vmwrite} 各自又触发一次对 L0 的退出，退出被逐级放大。两个边界需要重申：本章描述的是 2010 年原型在缺少嵌套架构支持时的实现，不能当作当前 KVM 全部路径的写照；DRW 这类配置改动了 guest hypervisor，其数字不能与未修改 guest 的结果混用。上一小节补充的第三点与此并列：硬件后来加入的辅助手段削减的是复用的成本，而不是复用的必要性，敏感指令并非在架构里一律只能靠陷入实现。成本究竟落在哪一段路径上、又该如何削减，是下一章的问题。
+至此可以把 Turtles 的结论压成两句。正确性一侧，它把三层语义压进单层硬件支持：VMX 指令被 trap-and-emulate，VMCS12 作为需求说明书由 L0 合成为 VMCS02，EPT12 与 EPT01 折叠成 EPT02，L2 的 DMA 经虚拟或半虚拟 IOMMU 落到真实 IOMMU，而每一次退出由 L0 判定归属——属于它的事件就地处理后直接恢复 L2，属于 L1 的事件才转发。代价一侧，任何需要 L1 处理的退出都要走 $L2 \to L0 \to L1 \to L0 \to L2$，而 L1 处理时执行的 \code{vmread}/\code{vmwrite} 各自又触发一次对 L0 的退出，退出被逐级放大。两个边界需要重申：本章描述的是 2010 年原型在缺少嵌套架构支持时的实现，不能当作当前 KVM 全部路径的写照；DRW 这类配置改动了 guest hypervisor，其数字不能与未修改 guest 的结果混用。上一节补充的第三点与此并列：硬件后来加入的辅助手段削减的是复用的成本，而不是复用的必要性，敏感指令并非在架构里一律只能靠陷入实现。成本究竟落在哪一段路径上、又该如何削减，是下一章的问题。
