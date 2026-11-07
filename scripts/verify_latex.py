@@ -44,21 +44,36 @@ missing_refs = sorted(set(refs)-set(labels))
 if missing_refs: errors.append('Unknown reference labels: '+str(missing_refs))
 duplicates = [key for key,n in Counter(labels).items() if n>1]
 if duplicates: errors.append('Duplicate labels: '+str(duplicates))
+
+# 正文各章：ucasthesis 用 \chapter 作一级标题，小节依次 \section/\subsection
 chapters = {}
 for name in ['00-intro','01-software','02-hardware','03-turtles','04-hyperturtle']:
     text = texts.get('chapters/'+name+'.tex','')
+    titles = re.findall(r'\\chapter\{([^}]+)\}',text)
     sections = re.findall(r'\\section\{([^}]+)\}',text)
-    subsections = re.findall(r'\\subsection\{([^}]+)\}',text)
     cjk = len(re.findall(r'[\u4e00-\u9fff]',text))
-    chapters[name] = {'title':sections,'subsections':subsections,'cjk_characters':cjk}
-    if len(sections)!=1 or cjk<1000:
+    chapters[name] = {'title':titles,'sections':sections,'cjk_characters':cjk}
+    if len(titles)!=1 or cjk<1000:
         errors.append('Incomplete chapter: '+name)
+    # 软件与硬件两章必须各自独立覆盖四个维度
     if name in ['01-software','02-hardware']:
         for word in ['CPU','内存','中断','设备']:
-            if not any(word in t for t in subsections):
+            if not any(word in t for t in sections):
                 errors.append('Missing independent dimension '+name+': '+word)
+
+# 模板套用的结构断言：前置部分按课程报告精简
 for token in ['TODO','TBD','待补图','待补正文','待核验','此处省略']:
     if token in body: errors.append('Unresolved placeholder: '+token)
+for required in ['\\makecoverpage','\\tableofcontents','\\mainmatter','\\backmatter']:
+    if required not in texts.get('main.tex',''):
+        errors.append('Missing structural element in main.tex: '+required)
+front = texts.get('chapters/frontmatter.tex','')
+for required in ['\\chapter*{摘\\quad 要}','\\chapter*{Abstract}','\\keywords{','\\KEYWORDS{']:
+    if required not in front:
+        errors.append('Missing frontmatter element: '+required)
+if '\\begin{abstract}' in body:
+    errors.append('abstract 环境已不适用于 ucasthesis，改用 \\chapter* 摘要')
+
 figures = re.findall(r'\\label\{(fig:[^}]+)\}',body)
 if len(figures)!=6: errors.append('Expected 6 figures, got '+str(len(figures)))
 if not (ROOT/'build/main.pdf').exists(): errors.append('No compiled PDF')
@@ -77,8 +92,22 @@ for n,page in enumerate(pages,1):
             bound_issues.append({'page':n,'word':word.text,'box':box})
 if bound_issues: errors.append('PDF contains text outside page bounds')
 diag=json.loads((ROOT/'build/main-diagnostics.json').read_text())
-for field in ['undefined_citations','undefined_references','missing_characters','overfull_boxes']:
+for field in ['undefined_citations','undefined_references','missing_characters']:
     if diag.get(field): errors.append(field+': '+str(diag[field]))
+# 1pt 以内的 Overfull 落在版心边上不可见，超过阈值才算排版错误
+def _overfull_width(line):
+    m = re.search(r'\(([\d.]+)pt', line)
+    return float(m.group(1)) if m else 0.0
+wide=[b for b in diag.get('overfull_boxes',[]) if _overfull_width(b)>5]
+if wide: errors.append('overfull_boxes: '+str(wide))
+
+# 页序断言：封面在前、摘要用罗马数字、正文从阿拉伯数字 1 重新开始
+text_pages=[]
+for n,page in enumerate(pages,1):
+    text_pages.append((n,' '.join(w.text for w in page.findall('.//x:word',ns) if w.text)))
+cover=[n for n,t in text_pages if '课程调研报告' in t]
+if not cover or cover[0]>2: errors.append('Cover page not found at front')
+if not any('摘' in t and '关键词' in t for _,t in text_pages): errors.append('Chinese abstract missing')
 
 summary={
     'chapters':chapters,

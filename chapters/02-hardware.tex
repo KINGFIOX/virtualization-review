@@ -1,4 +1,4 @@
-\section{硬件辅助虚拟化：Arm架构与KVM}\label{sec:hardware}
+\chapter{硬件辅助虚拟化：Arm架构与KVM}\label{sec:hardware}
 
 本章把执行载体换成具备硬件虚拟化能力的 AArch64 平台。研究对象是 AArch64 guest 运行在 AArch64 host 之上，CPU 架构以 Armv8.6-A 手册为准；GICv3/v4 与 SMMUv3 是各自独立的系统组件规范，其实现与否由具体 SoC 决定，不能由 CPU 的 ISA 版本直接推定某平台必然具备全部功能\cite{source4,source9,source10}。实现参照为 Linux 7.0.14 源码树中的 KVM/arm64、VGIC 与 SMMUv3 驱动\cite{source5}。与前章纯软件方案的根本差别在于：guest 的绝大多数指令与访存由真实处理器直接执行，hypervisor 不再解释每条指令，而是退到异常级 EL2 上，只在受控操作或外部事件发生时介入。软件与硬件之间的分工因此重新划分——上一章由软件完成的敏感指令捕获、地址翻译、中断注入，本章部分由处理器与系统组件承担；但设备功能、资源管理策略与组合仍留在软件。下面仍沿 CPU、内存、中断、设备四个维度展开，最后用一次直通设备 I/O 把四者串起。
 
@@ -58,7 +58,7 @@ struct kvm_arch {
 \end{enumerate}
 这份结构的分层同时给出分工的另一种表达：架构无关层表达资源管理的通用策略，\code{kvm_arch} 是本平台硬件机制的直接挂点，其中 \code{id_regs} 等字段存放的正是呈现给 guest 的虚拟标识寄存器值。后续各节每展开一个维度，都可回指这份结构：硬件给出机制，\code{struct kvm} 与每-vCPU 状态给出软件承接的方式。
 
-\subsection{CPU虚拟化：EL2、选择性陷入与vCPU上下文}\label{sec:hardware-cpu}
+\section{CPU虚拟化：EL2、选择性陷入与vCPU上下文}\label{sec:hardware-cpu}
 
 Arm 虚拟化的基本布局由异常级（Exception level）刻画。guest 的内核运行于 EL1、其应用程序运行于 EL0，二者合起来构成一个虚拟机（virtual machine）；hypervisor 运行于更特权的 EL2，负责在多个虚拟机之间切换\cite{source4}。EL2 为 guest 管理提供独立的控制寄存器与异常入口。guest 仍以 EL1 的接口建立页表、处理异常；它可以知道自己位于虚拟机中，也可以在大部分路径上无需感知 hypervisor，是否知情并非资源隔离的前提\cite{source4}。这一布局回答了“谁控制谁”：guest 控制的是 EL1/EL0 这一份状态，hypervisor 通过 EL2 控制系统资源的分发与回收，并为每个虚拟机分配一个 VMID 以在有关地址转换缓存中区分不同虚拟机的转换上下文。
 
@@ -191,7 +191,7 @@ SYM_INNER_LABEL(__guest_exit, SYM_L_GLOBAL)
 	ret                                   /* x0 = 退出码，回 C 层 */
 \end{lstlisting}
 
-退出码回到 C 层之后的循环是「怎么用」的主体。代码块~\ref{lst:arm-runloop} 按 \code{kvm_arch_vcpu_ioctl_run} 的实际结构给出示意：一次循环就是一次 vmentry/vmexit 往返，退出后按码分流，共有三种归宿——内核就地解决（返回正数，循环继续即下一次 vmentry）、需要 QEMU 介入（\code{exit_reason} 写入 \code{kvm_run} 后返回到 QEMU 进程）、致命错误（返回负数）。代表性的退出与去向见表~\ref{tab:arm-exit}\cite{source5}。
+退出码回到 C 层之后的循环是「怎么用」的主体。代码块~\ref{lst:arm-runloop} 按 \code{kvm_arch_vcpu_}\allowbreak\code{ioctl_run} 的实际结构给出示意：一次循环就是一次 vmentry/vmexit 往返，退出后按码分流，共有三种归宿——内核就地解决（返回正数，循环继续即下一次 vmentry）、需要 QEMU 介入（\code{exit_reason} 写入 \code{kvm_run} 后返回到 QEMU 进程）、致命错误（返回负数）。代表性的退出与去向见表~\ref{tab:arm-exit}\cite{source5}。
 
 \begin{lstlisting}[caption={退出循环：一次循环 = 一次 vmentry/vmexit 往返（依据 arm.c 的 kvm\_arch\_vcpu\_ioctl\_run 整理的示意）},label={lst:arm-runloop},style=pseudopy]
 # arch/arm64/kvm/arm.c —— QEMU 的每个 KVM_RUN 从这里进入
@@ -223,7 +223,7 @@ def kvm_arch_vcpu_ioctl_run(vcpu, run):
 \toprule
 \textbf{向量入口} & \textbf{判定依据} & \textbf{内核处理} & \textbf{去向} \\
 \midrule
-el1\_sync，EC=DABT\_LOW（数据中止） & ESR\_EL2.EC 查表 & kvm\_handle\_guest\_abort & Stage-2 缺页内核建映射后重进 guest；MMIO 无人认领则 exit\_reason=KVM\_EXIT\_MMIO 回 QEMU \\
+el1\_sync，EC=DABT\_LOW（数据中止） & ESR\_EL2.EC 查表 & kvm\_handle\_guest\_abort & Stage-2 缺页内核建映射后重进 guest；MMIO 无人认领则 exit\_reason=\allowbreak{}KVM\_EXIT\_MMIO 回 QEMU \\
 el1\_sync，EC=SYS64（系统寄存器） & ESR\_EL2.EC 查表 & kvm\_handle\_sys\_reg & 内核模拟被陷阱的寄存器访问，重进 guest \\
 el1\_sync，EC=HVC64 & 向量表内特判 & handle\_hvc（SMCCC） & 普通 PSCI 等调用内核处理；满足条件者在 EL2 内直接 eret 回 guest \\
 el1\_irq & 向量入口即区分 & handle\_exit 直接返回 1 & 宿主物理中断：内核处理完成后重进 guest \\
@@ -236,7 +236,7 @@ el1\_error & 向量入口即区分 & handle\_exit\_early，注入或按策略处
 
 宿主自身的运行方式可再优化。VHE（Virtualization Host Extensions）允许 host Linux 内核本身运行在 EL2，并提供适合宿主内核使用的寄存器访问与 EL2\&0 翻译体制；nVHE 则把 host Linux 留在 EL1，由独立的 EL2 hyp 代码执行敏感切换。二者改变的是宿主实现布局，guest 仍运行于 EL1/EL0。这些属于对同一机制的工程化补充，本章不展开成特性年表，只指出它们的共同目标：减少不必要的状态切换与 guest 退出\cite{source4,source5}。
 
-\subsection{内存虚拟化：VA到IPA到PA的两阶段翻译}\label{sec:hardware-mem}
+\section{内存虚拟化：VA到IPA到PA的两阶段翻译}\label{sec:hardware-mem}
 
 \begin{equation}
 \mathrm{VA}\xrightarrow[\text{guest 管理}]{\text{Stage-1}}\mathrm{IPA}
@@ -266,7 +266,7 @@ TLB 条目按地址空间标识区分：Stage-1 的 ASID 区分同一 guest 内�
 
 缺页与 MMIO 的处理由 KVM 的 \code{kvm_handle_guest_abort} 承接，它依据 \code{ESR_EL2} 里的故障分类把异常分流。对合法 guest RAM 的 Stage-2 缺页，KVM 沿 memory slot 把 IPA 换算成 QEMU 进程提供的宿主虚拟地址后备，再填充 Stage-2 页表完成映射；这一路径上 guest Stage-1 缺页与 Stage-2 缺页的责任是分开的——正常的 Stage-1 fault 通常直接由 guest 的异常处理程序接收，无须先退出给 KVM；Stage-2 fault 才需要 hypervisor 处理。KVM 在其他异常条件下也可能向 guest 注入异常，二者不应混淆\footnote{Linux: \path{arch/arm64/kvm/mmu.c}，\code{user_mem_abort()} 与故障分流。}。对 MMIO 区间则另走一路：guest 对设备寄存器 IPA 的访问没有对应内存后备，KVM 先尝试用内核的 \code{kvm_io_bus} 在宿主侧完成读写，成功则不再惊动 QEMU 进程；只有内核侧无人认领该地址时，才把 \code{exit_reason} 置为 \code{KVM_EXIT_MMIO}，连同地址与数据一起交回 QEMU 进程\footnote{Linux: \path{arch/arm64/kvm/mmio.c}，\code{io_mem_abort()} 及 \code{KVM_EXIT_MMIO} 的构造。}。因此“guest 退出”与“回到 QEMU”是两件事：一次 MMIO 访问若被内核的 io bus 处理，vCPU 全程不离开内核，也就谈不上每次都回 QEMU。这再次把“何时介入、介入到哪一层”写进了具体路径。
 
-\subsection{中断虚拟化：KVM、虚拟ITS与GICv4的直接注入}\label{sec:hardware-irq}
+\section{中断虚拟化：KVM、虚拟ITS与GICv4的直接注入}\label{sec:hardware-irq}
 
 中断侧的硬件辅助由 GIC（Generic Interrupt Controller）承担，它是一个独立于 CPU ISA 的系统组件。GIC 按功能分成四块：Distributor 主要管理共享外设中断及全局分发控制，Redistributor 以每处理器为单位维护 SGI（Software Generated Interrupt，软件生成中断）、PPI（Private Peripheral Interrupt，私有外设中断）及 LPI（Locality-specific Peripheral Interrupt，局部外设中断）的配置与 pending 状态，CPU interface 负责向本处理器呈现最高优先级中断并承载应答、去激活等接口，ITS（Interrupt Translation Service，中断翻译服务）则把设备通过内存写发送的消息型中断 MSI（Message Signaled Interrupt）翻译成 LPI 并路由到目标处理器\cite{source9}。这里的角色分工需要与内存、设备两维划清：ITS 处理的是中断路由，SMMU 处理的是 DMA 地址翻译，二者名字相近、对象不同，不能混为一谈。
 
@@ -371,7 +371,7 @@ def vgic_v4_doorbell_handler(irq, vcpu):   # 未驻留期间有 vLPI 到达
 
 边界必须说清：直接注入只覆盖“已驻留 vPE 的 vLPI”这一热路径，映射配置、vCPU 调度、未驻留时的唤醒与控制面仍由软件完成，不能说成“所有中断都完全绕过 hypervisor”\cite{source9,source11}。
 
-\subsection{设备虚拟化：SMMUv3、DMA隔离与设备直通}\label{sec:hardware-dev}
+\section{设备虚拟化：SMMUv3、DMA隔离与设备直通}\label{sec:hardware-dev}
 
 CPU 已被 Stage-2 约束，仍需要 SMMU 的原因在于 DMA 这条绕过 CPU 的访存路径。CPU 访存经 VA→IPA→PA 两阶段翻译，而 DMA 由设备发起，其地址由设备侧驱动填充，走的是与 CPU 完全不同的通路，CPU 的页表与 Stage-2 对此鞭长莫及。若不加约束，一个被直通给 guest 的设备可能访问不属于该 guest 的物理内存，从而击穿内存隔离。SMMU 即设备侧的地址翻译与访问控制单元：它拦截设备发出的 DMA 事务，对其地址做与 CPU 类似的翻译与权限检查，再把翻译后的地址放回互联上\cite{source10}。
 
@@ -437,14 +437,14 @@ def smmu_translate_dma(streamid, device_addr):
     return pa                            # 翻译后的地址放回互联
 \end{lstlisting}
 
-举一个具体的直通网卡例子。假设 guest 的内存布局里 \code{IPA 0x4000\_0000} 起的一段被 VFIO 锁进网卡的 DMA 域，对应 host 物理页 \code{PA 0x1\_2000\_0000}，网卡的 \code{StreamID=0x10}。建映射时，驱动把 \code{stream\_table[0x10]} 写成 \code{config=S2\_TRANS}、\code{s2vmid=7}、\code{s2ttb=<该域 stage-2 页表基址>}，并填一条表项 \code{IPA 0x4000\_0000 → PA 0x1\_2000\_0000}。运行时 guest 驱动往描述符里填“报文缓冲区在 \code{0x4000\_1000}”（这是 guest 的 IPA），网卡发起 DMA 读，SMMU 用 \code{StreamID=0x10} 取到那条 STE，沿 \code{s2ttb} 走出 \code{PA 0x1\_2000\_1000}，把翻译后的地址放到互联上完成传输。若 guest 恶意把描述符改成域外的 \code{IPA 0x8000\_0000}（未建映射），SMMU 查表失败、产生 translation fault 而不是访问那块内存——这正是 stage-2 在 DMA 侧兑现“resource control”的方式，与 CPU 侧 stage-2 缺页由 \code{kvm\_handle\_guest\_abort} 接管相对应。
+举一个具体的直通网卡例子。假设 guest 的内存布局里 \code{IPA 0x4000_0000} 起的一段被 VFIO 锁进网卡的 DMA 域，对应 host 物理页 \code{PA 0x1_2000_0000}，网卡的 \code{StreamID=0x10}。建映射时，驱动把 \code{stream_table[0x10]} 写成 \code{config=S2_TRANS}、\code{s2vmid=7}、\code{s2ttb=<该域 stage-2 页表基址>}，并填一条表项 \codeplain{IPA 0x4000_0000}~→~\codeplain{PA 0x1_2000_0000}。运行时 guest 驱动往描述符里填“报文缓冲区在 \code{0x4000_1000}”（这是 guest 的 IPA），网卡发起 DMA 读，SMMU 用 \code{StreamID=0x10} 取到那条 STE，沿 \code{s2ttb} 走出 \code{PA 0x1_2000_1000}，把翻译后的地址放到互联上完成传输。若 guest 恶意把描述符改成域外的 \code{IPA 0x8000_0000}（未建映射），SMMU 查表失败、产生 translation fault 而不是访问那块内存——这正是 stage-2 在 DMA 侧兑现“resource control”的方式，与 CPU 侧 stage-2 缺页由 \code{kvm_handle_guest_abort} 接管相对应。
 
 
 这一结构给出若干层次的取舍，不能想当然地全盘启用。最简的直通只需 Stage-2：hypervisor 在 STE 里配置 S2 页表，把设备使用的 guest IPA 翻译成 host PA，guest 完全不必感知 SMMU 的存在，也就谈不上 vIOMMU。仅 Stage-2 是架构许可的一条路径，但它不等同于 Linux 普通直通域的实际默认——本机 SMMUv3 驱动为普通域分配 paging domain 时，在硬件支持 Stage-1 的情况下会优先选用宿主管理的 S1\footnote{Linux: \path{drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c}，\codeplain{arm_smmu_domain_alloc_paging_flags()} 中的 S1/S2 选择。}，因而物理 SMMU 使用 S1，并不说明该 S1 是 guest 管理的，也不说明 guest 一定看见了 vIOMMU。guest 自管 I/O Stage-1 是可选项：只有当 guest 需要自己的 IOMMU 语义（例如在 guest 内部再隔离各驱动或做嵌套）时，才把 Stage-1 的 CD 与页表交给 guest 以 IPA 编址，由 hypervisor 的 Stage-2 继续把 IPA 翻成 PA，形成 S1+S2 的两级组合\cite{source10}。
 
 真正的设备直通是一项系统工程，SMMU 只是其中一环。把一块物理设备整个交给 guest，还须解决设备分配与控制接口、VFIO/IOMMU 的 DMA 映射、该设备中断在 GIC 中的路由（把物理中断映射到目标 vCPU）、以及设备复位与可迁移性等一组协作问题；SMMU 既不是设备模型，也不会替代 virtio 或实现网卡/磁盘的功能——它只解决“设备访存不越界”这一件事。反过来，软件设备的 guest 内存访问由宿主 CPU 通过后备内存映射完成，不要求经过物理 SMMU，也不一定每次都执行一次拷贝；后端若进一步使用真实设备，其硬件 DMA 仍由宿主的 IOMMU/DMA 管理机制约束\cite{source5,source10}。
 
-\subsection{协作小结：硬件负责机制，软件负责管理与组合}\label{sec:hardware-sum}
+\section{协作小结：硬件负责机制，软件负责管理与组合}\label{sec:hardware-sum}
 
 以采用 I/O Stage-2 的直通设备为例，guest 驱动通过已映射的 BAR 访问设备寄存器时，可以直接访问获授权的硬件区域，无须先退出到内核 MMIO 总线。配置空间或需拦截的访问才由软件处理。真实设备随后发起 DMA，SMMU 将设备使用的 guest 地址转换到获授权的 host 物理页；设备产生完成消息后，GIC 与 KVM 按配置投递中断。只有满足相应 GICv4 条件的 vLPI 才使用直接注入，其他事件仍有软件参与。普通 Linux 直通域也可使用宿主管理的 I/O S1，不能把这个示例当作所有部署的固定配置\cite{source5,source9,source10}。
 

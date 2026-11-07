@@ -1,9 +1,9 @@
-\section{嵌套虚拟化（一）：Turtles 与多层语义的单层复用}\label{sec:nested}
+\chapter{嵌套虚拟化（一）：Turtles 与多层语义的单层复用}\label{sec:nested}
 
 
 前两章分别考察了纯软件模拟与以 Arm 为代表的硬件辅助虚拟化，二者处理的都是“一层 hypervisor 直接管理一层 guest”的问题。本章把对象再推进一层：当 hypervisor 自己就跑在一台虚拟机里时，机器状态、地址映射与事件策略要如何组合才既正确又可接受地快。架构口径限定为 x86-64，即 amd64 这一 ISA 称谓，讨论的机制都落在 Intel 的 VMX 指令集、VMCS 控制结构与 EPT 扩展页表上，不使用 AMD SVM 的 VMCB/NPT 术语，也不把 Arm 的 EL2 异常级名称移植过来。唯一的例外在第~\ref{sec:nested-notrap} 节：那里要说明“敏感指令并非一律只能靠陷入实现”这一结论并不限于某一家的扩展，因此把 Arm 的 FEAT\_NV 作为对照引入；该对照只用于说明取舍结构，不把两套机制写成同构，也不改变本章其余部分以 VMX 为口径的叙述。嵌套这一问在文献里分成前后两段：OSDI 2010 年的 Turtles 回答“在缺乏架构支持时怎样正确实现嵌套”~\cite{source7}，USENIX ATC 2025 年的 HyperTurtle 回答“在已经能嵌套的前提下怎样减少不必要的跨层往返”~\cite{source8}。前一问是后一问的前提，二者不能按同一标准横向比较性能，只能按“谁控制资源、关键路径怎么走、何时介入、代价多大”这条主线先后展开。本章处理第一问，即多层语义如何被复用到底层的单层硬件支持上；下一章处理第二问，即往返成本如何削减。
 
-\subsection{问题建立：当hypervisor自己也在虚拟机里}\label{sec:nested-problem}
+\section{问题建立：当hypervisor自己也在虚拟机里}\label{sec:nested-problem}
 
 嵌套虚拟化的层级用下标约定：L0 是跑在裸机上的 hypervisor，L1 是运行在 L0 虚拟机里的 guest hypervisor，L2 则是 L1 自己管理的嵌套 guest。L1 得到的机器接口必须包含它管理 L2 所需的虚拟化能力，即使真实 VMX 资源仍由 L0 控制；L2 则使用 L1 向它提供的虚拟机器接口~\cite{source7,source8}。
 
@@ -13,7 +13,7 @@
 
 代价的直观体现是事件路径被拉长。当 L2 里发生一个需要 L1 处理的 VM-exit 时，CPU 先退出到 L0，L0 判断该事件需要向 L1 报告，并向 L1 反射退出，L1 处理完毕请求恢复 L2，L0 再次介入执行 VMEntry，最后才回到 L2，形成 $L2 \to L0 \to L1 \to L0 \to L2$ 的往返。但这条链不是所有事件都要走完：外部中断、NMI，以及只有 L0 在 VMCS02 里设置了 trap 而 L1 没在 VMCS12 里设置的事件，属于 L0 自己的范畴，L0 就地处理后直接恢复 L2，从 L1 的视角看这些事件根本不存在——正如单层虚拟化里 CPU 透明处理一次硬件事件后 hypervisor 继续运行一样~\cite{source7}。事件归属的判定权始终在 L0 手里，这才是“L0 保留最终控制”的准确含义，而不是“所有事件逐层转发”。
 
-\subsection{Turtles：把多层语义组合到单层硬件支持上}\label{sec:turtles}
+\section{Turtles：把多层语义组合到单层硬件支持上}\label{sec:turtles}
 
 Turtles 是 KVM 之上的嵌套虚拟化实现，目标是运行未经修改的 guest hypervisor（KVM、VMware Server 等）及其 guest 系统。它在当时缺少专门嵌套硬件支持的条件下实现了可用的嵌套系统，并通过多类负载测量开销；论文的低开销结果不是对所有负载的统一上界。其实现涉及：CPU 上的 VMCS 合成、内存上的多维分页、I/O 上的多级设备分配，以及贯穿其中的退出归属判定~\cite{source7}。下面按四个维度分别说明“谁读写什么、怎样合成、代价在何处”。四维共同的骨架先由图~\ref{fig:turtles-arch} 固定。
 
@@ -26,7 +26,7 @@ Turtles 是 KVM 之上的嵌套虚拟化实现，目标是运行未经修改的 
 
 图中三份状态都用 VMCS 与内存表（memory tables）两项表示，这正对应硬件虚拟化的两组对象：控制结构与地址翻译结构。0-1 是 L0 运行 L1 用的状态，0-2 是 L0 运行 L2 用的状态，二者都由 L0 维护并真正被硬件装载；1-2 是 L1 为 L2 准备的状态，图中以一个只存在于软件视角的方框表示——它从不进入处理器，只作为 L0 合成 0-2 的输入。同一张图也说明了嵌套的层级含义：硬件层之上只有 L0 一层 hypervisor 与它的虚拟机，L1 的“hypervisor 身份”完全由 L0 在软件中构造，这正是后面 CPU 与内存两节各自要展开的合成工作的出发点。
 
-\subsubsection{CPU：虚拟化VMX与合成VMCS}\label{sec:nested-cpu}
+\subsection{CPU：虚拟化VMX与合成VMCS}\label{sec:nested-cpu}
 
 在论文使用的单层 VMX 基线上，L1 在 VMX non-root 环境执行虚拟化管理指令会触发相应的拦截，这就给了 L0 一个天然的介入点：L0 捕获并模拟 L1 的 VMX 指令，也就是“trap-and-emulate”。大部分 VMX 指令的处理是“L1 退出到 L0、L0 按 VMCS 更新规则改写状态、再回到 L1”，让 L1 觉得指令真的执行了；但用来启动虚拟机的 \code{vmresume} 与 \code{vmlaunch} 是例外，因为此时 L0 必须模拟一次 L1→L2 的 VMEntry，流程变成“L1 退出到 L0，L0 直接 VMEntry 进入 L2”~\cite{source7}。
 
@@ -34,7 +34,7 @@ Turtles 是 KVM 之上的嵌套虚拟化实现，目标是运行未经修改的 
 
 控制数据的合成是正确性的重心。设想 L1 在 VMCS12 里要求 trap 某事件 $E_A$，但 L0 在 VMCS01 里并没有为 L1 trap 这个事件，那么为了把 $E_A$ 转发给 L1，L0 必须在 VMCS02 里补上对应的 trap；同理，L1 用来向 L2 注入事件的字段、以及 CPU 用来报告退出原因的字段都要合并。这套合并的具体实现落在 KVM 源码里，论文没有逐字段展开~\cite{source7}。这里有一个必须澄清的术语边界：Turtles 所说的 VMCS shadowing 是 L0 在软件层面“影子维护”VMCS12 并合成 VMCS02 的技术，与后来 Intel 在 Haswell 引入的同名硬件特性（让 L0 不必在每次 \code{vmread}/\code{vmwrite} 时都 trap）不是一回事；Turtles 的机制不依赖任何后续硬件能力~\cite{source7,source8}。同样，Turtles 描述的 2010 年合成逻辑，不应被当成当前 KVM 全部路径的写照——如今内核里的实现（如 \path{arch/x86/kvm/vmx/nested.c} 的 \code{prepare_vmcs02}）已经历多次重构并叠加了硬件加速，只可作为“合成 VMCS02 这一思路延续至今”的旁证，而非当年原型的源码~\cite{source5}。
 
-\subsubsection{内存：EPT on top of EPT 的多维分页}\label{sec:nested-mem}
+\subsection{内存：EPT on top of EPT 的多维分页}\label{sec:nested-mem}
 
 地址翻译在嵌套下多出一层：逻辑链是 L2 VA→L2 GPA→L1 GPA→host PA，即三层表。但当时的硬件 MMU 最多只支持两维（guest 页表 + EPT/NPT），无法同时走三层，因此必须把三层折叠到硬件提供的两层上。图~\ref{fig:turtles-mmu} 给出论文比较的三种折叠方式，区别在于哪一层由软件兜住：第一栏两层影子页表、第二栏影子页表叠在 EPT 上、第三栏才是 Turtles 采用的多维分页（图中标注为 EPT on top of EPT）。前两栏的共同点是 L1 用影子页表跑 L2，于是 L2 的每次页故障和每次页表写都要 L1 处理、并经 L0 转发；本节只展开第三栏，前两栏仅作为代价对照留在图上~\cite{source7}。
 
@@ -64,13 +64,13 @@ L2 访问某个 GPA 时，EPT02 里对应项不存在，触发一次 EPT violati
 \label{fig:turtles-mmu}
 \end{figure}
 
-\subsubsection{中断：事件归属、转发与注入}\label{sec:nested-irq}
+\subsection{中断：事件归属、转发与注入}\label{sec:nested-irq}
 
 嵌套下的中断必须分清三件不同的事：宿主自己产生的外部中断或 NMI，L0 要注入给 L1 的虚拟中断，以及 L1 希望注入给 L2 的事件。它们的处理路径不同。当 L2 正在运行且发生一次退出时，L0 首先按 VMCS12 与 VMCS02 的 trap 配置判断归属：属于 L0 的事件（外部中断、NMI，或只在 VMCS02 里 trap 的事件）就地处理后恢复 L2；属于 L1 的事件，L0 把 CPU 已更新的 VMCS02 字段拷回 VMCS12，再恢复 L1，让 L1 觉得是一次 L2→L1 的直接退出~\cite{source7}。注入方向上，L1 在 VMCS12 里写的注入字段要被 L0 合并进 VMCS02，才能让 CPU 真正把中断送进 L2。
 
 设备分配场景揭示了一个关键的非对称性：DMA 直达不等于中断直达。多级设备分配让 L2 的数据可以直接落到设备，但中断在当时的 x86 架构上无法直接派发给 guest——中断到来总是先退出到 L0，L0 再转发 L1，L1 注入 L2，其中断的 EOI 写回也会再次触发退出。论文据此推断，设备中断及其 EOI 造成的退出是设备分配场景下残余开销的最大来源，并用一个去掉中断、纯轮询的网络驱动做了对照实验来支撑这一假设~\cite{source7}。需要强调的是，这是 2010 年原型在当时架构下的路径描述；后续硬件与 KVM 实现继续演进，因而不能把当年的中断处理路径断言为所有当前实现的必然行为~\cite{source7,source8}。
 
-\subsubsection{设备：多级设备分配与虚拟IOMMU}\label{sec:nested-dev}
+\subsection{设备：多级设备分配与虚拟IOMMU}\label{sec:nested-dev}
 
 两层虚拟化各可选用模拟、半虚拟化或设备分配三种 I/O 方式，组合出九种可能，Turtles 重点评估了其中五种，并把“L0→L1 与 L1→L2 都做设备分配”称为多级设备分配~\cite{source7}。其目标不是把真实网卡“直通”给 L2 就完事，而是要在数据路径外补全三条辅助路径。
 
@@ -78,17 +78,17 @@ DMA 的地址问题是第一道坎：guest 驱动用的是 guest 物理地址，
 
 把四维放在一起看，Turtles 的“组合”有统一的形状：L1 表达的要求（VMCS12、EPT12、L1 侧的 IOMMU 映射）是输入，L0 自身的约束（VMCS01、EPT01、真实 IOMMU 的能力）是另一组输入，两者合并成一份硬件当下可执行的产物（VMCS02、EPT02、真实 IOMMU 里的映射表），而合并的依据始终是归属判定——退出归谁处理、缺项归谁填、设备地址归谁分配。图~\ref{fig:turtles-arch} 给出这一形状在整机层面的样子：三份状态中只有两份被硬件装载，第三份停留在软件里充当输入。
 
-\subsection{Turtles 的开销与评测}\label{sec:turtles-cost}
+\section{Turtles 的开销与评测}\label{sec:turtles-cost}
 
 Turtles 的成就是正确性与可行性：在不修改 guest hypervisor 的前提下给出了嵌套语义。但它的开销分析也暴露了问题的下一层形态。论文用 L2 里循环执行 \code{cpuid} 的合成微基准测单次退出的周期成本：裸机上 \code{cpuid} 约 100 周期，单层虚拟化约 2600 周期（其中约 1000 周期是模式切换），嵌套则飙到约 58000 周期~\cite{source7}。原因是 L1 每处理一次 L2 退出，都要执行多条 \code{vmread}/\code{vmwrite} 这类特权指令，而每条又各自触发一次对 L0 的退出——退出被逐级放大。论文在这里区分两类优化。L0 的合并路径可以只拷贝变化字段，并探索直接批量访问真实 VMCS 的方式；后一尝试不严格符合 VMX 规范，不能保证跨处理器适用。另一个称为 DRW 的评测配置则明确修改 L1，使其直接读写 VMCS12，用来估计省去 L1 的 VMREAD/VMWRITE 拦截的潜在收益。这两类直接访问不能混称为只修改 L0 的同一个优化~\cite{source7}。
 
 论文的宏观负载报告给出同一方向的证据：在 KVM 同时充当 L0 与 L1 并启用多维分页的配置下，相对单层 guest，kernbench 的运行时间增加 14.5\%，SPECjbb 分数下降约 7.8\%；改用修改 L1、使其直接读写 VMCS12 的 DRW 配置后，两项数值分别变为 10.3\% 与 6.3\%~\cite[\S4.1, Table 2]{source7}。这些是论文报告值，不是本文复现。数值差异说明管理路径的密集程度会影响嵌套成本，摘要中的较低开销不能解释为适用于全部工作负载的上界；DRW 改动了 guest hypervisor，必须与未修改 guest 的基线分别讨论。
 
-\subsection{三条路径在今天的实现}\label{sec:nested-code}
+\section{三条路径在今天的实现}\label{sec:nested-code}
 
 第~\ref{sec:turtles-cost} 节的成本分析停在“退出被逐级放大”这个结论上。那套合成逻辑在今天的 KVM 里被重写过多次，但三条路径的形状保留了下来：退出要判归属，地址要把三级压成两级，设备映射要在两层之间折叠。下面用 Linux 7.0.14 的 Intel VMX 与 VT-d 实现各给一段伪代码，只保留控制流，删去错误处理、优化分支与并发细节。这些片段是当前实现的旁证，既不是 2010 年原型的源码，也不构成任何性能主张~\cite{source5}。
 
-\subsubsection{退出的归属与转发}\label{sec:nested-code-exit}
+\subsection{退出的归属与转发}\label{sec:nested-code-exit}
 
 L2 触发退出后，L0 并不无条件转发，而是按“L0 要不要 → L1 要不要”的顺序问两遍。\code{nested_vmx_reflect_vmexit()} 的前两问就是这个顺序：L0 自己需要的退出（外部中断、NMI、EPT violation、PML 满等）直接截下，L1 没在 VMCS12 里要求 trap 的退出也留在 L0；只有两问都答“是”，才把 CPU 写进 VMCS02 的退出信息搬回 VMCS12，再用 VMCS12 的 host state 填 VMCS01 的 guest state，让 L1 以为这是一次从 L2 直达自己的退出。代码块~\ref{lst:nested-exit} 把这一轮往返压成三个函数。
 
@@ -117,7 +117,7 @@ def l1_and_back(vcpu):
 
 三个函数对应一条完整链路。归属判定由 \code{nested_vmx_reflect_vmexit()} 提前做出，只有两问皆“是”的退出才值得跨层；随后 \code{__nested_vmx_vmexit()} 完成 0-2 状态到 1-2 视角的改写，让 L1 以为自己被直接退出；\code{l1_and_back()} 则把回程压在一起——L1 处理时每条 \code{vmread}/\code{vmwrite} 都要再走一遍前两个函数，最后它的 \code{vmresume} 被 L0 截住，重新合成 VMCS02 才回到 L2。要注意 \code{l0_wants_exit()} 与 \code{l1_wants_exit()} 都是长 switch：前者把外部中断、NMI、EPT violation 等三十来种退出原因逐一列出，后者按 VMCS12 的各个 trap 控制位分支，而 VMX 指令类（\code{vmclear}/\code{vmptrld}/\code{vmread}/\code{vmwrite}/\code{invept} 等）一律返回“L1 要”——注释里的说法是，这样才能让 L1 为它的 L2 模拟这些指令，从而支撑三层嵌套~\cite{source5}。
 
-\subsubsection{EPT on EPT：三级地址压成两级}\label{sec:nested-code-ept}
+\subsection{EPT on EPT：三级地址压成两级}\label{sec:nested-code-ept}
 
 今天 KVM 的做法与 Turtles 的多维分页同源：不把 L1 的 EPT 当作可直接装载的结构，而是以它为蓝本建一份影子上下文，把“L2 GPA → L1 GPA”这一段交给它，硬件真正装载的仍是 L0 自己的 EPT。\code{nested_ept_init_mmu_context()} 做的就是这个切换——它把 \code{vcpu.arch.mmu} 指向 \code{guest_mmu}（负责 L2 GPA → L1 GPA），把 \code{walk_mmu} 指向 \code{nested_mmu}（负责 L2 GVA → L1 GPA，即先走 L2 自己的页表、再走 EPT12）。源码注释把这件事说得很直白：两个上下文的 \code{gva_to_gpa} 是互换的~\cite{source5}。代码块~\ref{lst:nested-ept} 给出从进入 L2 到补齐一个缺项的路径。
 
@@ -147,7 +147,7 @@ def ept_violation_in_l0(vcpu, l2_gpa, access):
 
 关键在于 \code{fill_spte()} 只写一份表：不是“先查 EPT12 再查 EPT01”留给硬件在每次访存时走两遍，而是把两跳的终点预先算出来写进 L0 的 EPT，此后硬件对 L2 GPA 只做一次遍历。代价与 Turtles 描述的一致——这张表要与 EPT12 保持同步，L1 改动自己的 EPT 时必须让对应的影子项失效，所以 \code{nested_ept_inject_page_fault()} 里除了把 fault 注入 L1，还要按 \code{vmcs12.ept_pointer} 对应的 EP4TA 做一次地址级失效：TLB 认的是 EP4TA 而不是完整 EPTP，凡挂在这张 EPT 上的影子都得同步~\cite{source5}。L1 没有映射时，退出就带着 L2 GPA 注入给 L1，责任判定仍是“缺项归谁填”。
 
-\subsubsection{IOMMU：两级硬件与中间的第三跳}\label{sec:nested-code-iommu}
+\subsection{IOMMU：两级硬件与中间的第三跳}\label{sec:nested-code-iommu}
 
 设备侧的逻辑链更长：DMA 用的是 L2 的访存地址，真实设备要用 host 物理地址，中间还夹着 L1。Turtles 当年面对的硬件只支持一级翻译，两层映射只能靠半虚拟化或模拟 IOMMU 压缩成一层；今天 VT-d 的嵌套翻译给了两级，但两级仍不等于无限级。Linux 的实现落在 PASID 项上：一个 stage-1 域嵌套在 stage-2 域之上，S1 的页表基址由 guest 侧提供，S2 的基址由 L0 持有，翻译类型标成 \code{nested}。
 
@@ -178,7 +178,7 @@ def dma_translate(dev, pasid, iova):
 
 三条路径放在一起，Turtles 的抽象就不再只是 2010 年的一段历史。归属判定在 \code{nested_vmx_reflect_vmexit()} 里仍是两问；地址折叠在 \code{translate_nested_gpa()} 与 \code{fill_spte()} 里仍是先查蓝本再写终点；设备地址在 PASID 项里仍是 S1/S2 两级加一层软件兜底。变化的是实现位置与加速手段——控制结构换成了影子 VMCS，表项换成了支持大页的 EPT，IOMMU 从“只有一级”变成了“两级加嵌套类型”——而这些变化都没有取消归属判定，也没有把三级变成免费的。
 
-\subsection{边界：敏感不等于必须陷入}\label{sec:nested-notrap}
+\section{边界：敏感不等于必须陷入}\label{sec:nested-notrap}
 
 第~\ref{sec:turtles-cost} 节把 \code{vmread}/\code{vmwrite} 的逐条退出记为嵌套成本的主要放大源，但这容易被读成“嵌套本来就该如此”。真正决定要不要退出的，是这条指令的效果落到了哪里，而不是它是否敏感。在单层 VMX 基线上，L1 在 non-root 环境执行 \code{vmread}/\code{vmwrite} 必然退出，原因是处理器手上没有一份可以替 L1 接收这次访问的控制结构，访问只能由 L0 在软件里接住、再按 VMCS 更新规则改写；一旦硬件能提供这样一份副本，同样的指令就能原地执行，L0 退到副本与自身状态之间的同步位置上。第~\ref{sec:nested-cpu} 节末尾区分过 Turtles 的软件影子与 Intel 后来的同名硬件特性，本节补齐后者究竟省掉了什么。
 
@@ -190,6 +190,6 @@ Arm 一侧的对应问题落在系统寄存器上。guest hypervisor 在 EL1 需
 
 两者常被并置，但不宜推成同构：一边让字段访问落到一份影子控制结构，一边把寄存器访问改写成内存访问，指令、状态与失效规则都不相同。可以说的是同一件事——逐条陷入不是敏感指令的唯一归宿，只要架构能提供一份 L0 仍能约束的副本，退出就可以从关键路径上挪走。挪走之后代价并没有消失，只是转成了副本的一致性维护：KVM 里针对 FEAT\_NV2 的注释就指出 guest hypervisor 可以绕过 L0 改写 \code{HCR_EL2}、从而影响宿主侧的异常路由与屏蔽，需要额外代码把状态收回来~\cite{source5}。这类扩展削掉的是往返，不是 L0 的最终控制权，也不是“所有敏感指令都可以直接执行”：真正要改动真实硬件状态的操作，例如 VMEntry/VMExit、TLB 失效与中断投递，仍要回到 L0。
 
-\subsection{小结：正确性之后剩下的成本}\label{sec:turtles-summary}
+\section{小结：正确性之后剩下的成本}\label{sec:turtles-summary}
 
 至此可以把 Turtles 的结论压成两句。正确性一侧，它把三层语义压进单层硬件支持：VMX 指令被 trap-and-emulate，VMCS12 作为需求说明书由 L0 合成为 VMCS02，EPT12 与 EPT01 折叠成 EPT02，L2 的 DMA 经虚拟或半虚拟 IOMMU 落到真实 IOMMU，而每一次退出由 L0 判定归属——属于它的事件就地处理后直接恢复 L2，属于 L1 的事件才转发。代价一侧，任何需要 L1 处理的退出都要走 $L2 \to L0 \to L1 \to L0 \to L2$，而 L1 处理时执行的 \code{vmread}/\code{vmwrite} 各自又触发一次对 L0 的退出，退出被逐级放大。两个边界需要重申：本章描述的是 2010 年原型在缺少嵌套架构支持时的实现，不能当作当前 KVM 全部路径的写照；DRW 这类配置改动了 guest hypervisor，其数字不能与未修改 guest 的结果混用。上一小节补充的第三点与此并列：硬件后来加入的辅助手段削减的是复用的成本，而不是复用的必要性，敏感指令并非在架构里一律只能靠陷入实现。成本究竟落在哪一段路径上、又该如何削减，是下一章的问题。
